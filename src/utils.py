@@ -139,7 +139,7 @@ def save_experiment_results(exp_name, metrics, y_true, y_pred, train_accs, train
         'Recall (Weighted)': round(metrics['recall_weighted'] * 100, 2),
         'F1-Score (Weighted)': round(metrics['f1_weighted'] * 100, 2)
     }
-    
+    summary_csv = os.path.join("results", "experiment_summary.csv")
     if os.path.exists(summary_csv):
         summary_df = pd.read_csv(summary_csv)
         # Overwrite row if experiment already ran, else append
