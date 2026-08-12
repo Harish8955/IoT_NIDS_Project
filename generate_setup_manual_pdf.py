@@ -187,24 +187,13 @@ def build_setup_manual_pdf(filename="Teammates_Setup_Manual.pdf"):
     story.append(Spacer(1, 6))
 
     # =========================================================================
-    # STEP 4: PLACE DATASETS & RUN COMBINERS
+    # STEP 4: PRE-COMBINED DATASETS (NO COMBINING NEEDED!)
     # =========================================================================
-    story.append(Paragraph("STEP 4: Place Datasets & Run Combiner Scripts (One-Time Setup)", h1_style))
-    story.append(Paragraph("Place raw dataset files in <code>data/</code> and generate combined master CSVs:", body_style))
-    
-    code4 = (
-        "python combine_unsw_nb15.py\n"
-        "python combine_cic_ids2018.py\n"
-        "python combine_ciciot23.py"
-    )
-    t_code4 = Table([[Paragraph(f"<font face='Courier' size='8'>{code4.replace('\n', '<br/>').replace(' ', '&nbsp;')}</font>", table_cell_style)]], colWidths=[540])
-    t_code4.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,-1), BG_LIGHT),
-        ('BOX', (0,0), (-1,-1), 1, BORDER_COLOR),
-        ('TOPPADDING', (0,0), (-1,-1), 4),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
-    ]))
-    story.append(t_code4)
+    story.append(Paragraph("STEP 4: Pre-Combined Master Datasets (Ready to Train)", h1_style))
+    story.append(Paragraph("The master datasets are <b>already pre-combined</b> inside the shared Google Drive / project package (`data/`). Teammates can skip dataset combining and proceed directly to model training!", body_style))
+    story.append(Paragraph("• <code>data/UNSW_NB15_combined.csv</code> (Pre-combined UNSW-NB15 dataset)<br/>"
+                           "• <code>data/CIC_IDS2018_combined.csv</code> (Pre-combined CSE-CIC-IDS2018 dataset)<br/>"
+                           "• <code>data/CICIOT23_combined.csv</code> (Pre-combined CIC-IOT2023 dataset)", body_style))
     story.append(Spacer(1, 6))
 
     # =========================================================================
