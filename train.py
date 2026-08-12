@@ -7,7 +7,6 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 
-from generate_sample_data import generate_unsw_nb15_sample
 from src.preprocessing import prepare_train_test_split, prepare_official_split
 from src.ctgan_balancer import CTGANBalancer
 from src.model import get_model
@@ -27,11 +26,10 @@ def train_and_evaluate(args):
     # Step 1: Load Datasets (Check if official test set is provided)
     data_path = args.dataset
     if not os.path.exists(data_path):
-        print(f"Dataset path '{data_path}' not found. Generating sample benchmark dataset...")
-        df = generate_unsw_nb15_sample(output_path=data_path, num_samples=3000)
-    else:
-        print(f"Loading training dataset from: {data_path}")
-        df = pd.read_csv(data_path)
+        raise FileNotFoundError(f"Dataset file '{data_path}' not found! Please check the dataset file path.")
+    
+    print(f"Loading training dataset from: {data_path}")
+    df = pd.read_csv(data_path)
 
     has_official_test = args.test_dataset and os.path.exists(args.test_dataset)
 
