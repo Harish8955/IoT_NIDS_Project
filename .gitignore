@@ -1,0 +1,26 @@
+# Virtual Environments
+venv/
+myenv/
+ENV/
+env/
+
+# Large Datasets (>100MB GitHub limit)
+data/*.csv
+data/cic_ids2018_raw/*.csv
+data/CICIOT23/*.csv
+
+# Python Cache & Compiled Files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE & Editor Settings
+.vscode/
+.idea/
+*.swp
