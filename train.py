@@ -18,7 +18,8 @@ def train_and_evaluate(args):
     print(f"Using compute device: {device}")
 
     balance_suffix = "balanced" if args.balance else "raw"
-    exp_name = f"{args.model}_{balance_suffix}"
+    ds_prefix = args.dataset_name.lower().replace("-", "_")
+    exp_name = f"{ds_prefix}_{args.model}_{balance_suffix}_{args.epochs}ep"
     print(f"\n==================================================")
     print(f"    RUNNING EXPERIMENT: {exp_name.upper()}")
     print(f"==================================================")
