@@ -1,0 +1,2 @@
+Experiment,Train Accuracy,Test Accuracy,Precision (Macro),Recall (Macro),F1-Score (Macro),Precision (Weighted),Recall (Weighted),F1-Score (Weighted)
+unsw_nb15_proposed_balanced_100ep,88.06,86.92,87.89,83.2,83.75,88.44,86.92,86.39

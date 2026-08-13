@@ -111,6 +111,8 @@ def train_and_evaluate(args):
     model.eval()
     y_preds, y_trues = [], []
 
+    import time
+    start_eval = time.time()
     with torch.no_grad():
         for X_batch, y_batch in test_loader:
             X_batch = X_batch.to(device)
@@ -122,12 +124,22 @@ def train_and_evaluate(args):
             _, predicted = torch.max(outputs, 1)
             y_preds.extend(predicted.cpu().numpy())
             y_trues.extend(y_batch.numpy())
+    eval_time_sec = time.time() - start_eval
+    num_test_samples = len(y_trues)
+    latency_ms = (eval_time_sec / num_test_samples) * 1000 if num_test_samples > 0 else 0.0
+    throughput_pps = num_test_samples / eval_time_sec if eval_time_sec > 0 else 0.0
 
     metrics = compute_metrics(y_trues, y_preds)
     metrics['train_accuracy'] = train_accs[-1] if train_accs else 0.0
+    metrics['inference_latency_ms'] = latency_ms
+    metrics['throughput_pps'] = throughput_pps
 
     print(f"\n✅ FINAL TRAIN ACCURACY: {metrics['train_accuracy'] * 100:.2f}%")
     print(f"✅ FINAL TEST ACCURACY : {metrics['accuracy'] * 100:.2f}%")
+    print(f"⚡ FALSE ALARM RATE (FAR) : {metrics['false_alarm_rate'] * 100:.2f}%")
+    print(f"⚡ DETECTION RATE (DR)   : {metrics['detection_rate'] * 100:.2f}%")
+    print(f"⚡ INFERENCE LATENCY     : {latency_ms:.4f} ms / packet")
+    print(f"⚡ THROUGHPUT            : {throughput_pps:.2f} Packets / Sec")
 
     # Step 8: LOCO Zero-Day Evaluation (If hide_class specified)
     if zero_day_df is not None and len(zero_day_df) > 0:

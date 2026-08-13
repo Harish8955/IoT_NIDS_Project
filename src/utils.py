@@ -50,11 +50,26 @@ def compute_metrics(y_true, y_pred):
     rec_weighted = recall_score(y_true, y_pred, average='weighted', zero_division=0)
     f1_weighted = f1_score(y_true, y_pred, average='weighted', zero_division=0)
 
+    mcc = matthews_corrcoef(y_true, y_pred)
+
+    # Compute False Alarm Rate (FAR / FPR) from confusion matrix
+    cm = confusion_matrix(y_true, y_pred)
+    fp = cm.sum(axis=0) - np.diag(cm)
+    fn = cm.sum(axis=1) - np.diag(cm)
+    tp = np.diag(cm)
+    tn = cm.sum() - (fp + fn + tp)
+    
+    fpr_per_class = fp / (fp + tn + 1e-10)
+    far_macro = float(np.mean(fpr_per_class))
+
     return {
         'accuracy': acc,
         'precision_macro': prec_macro,
         'recall_macro': rec_macro,
         'f1_macro': f1_macro,
+        'detection_rate': rec_macro,
+        'false_alarm_rate': far_macro,
+        'mcc': mcc,
         'precision_weighted': prec_weighted,
         'recall_weighted': rec_weighted,
         'f1_weighted': f1_weighted
@@ -135,6 +150,11 @@ def save_experiment_results(exp_name, metrics, y_true, y_pred, train_accs, train
         'Precision (Macro)': round(metrics['precision_macro'] * 100, 2),
         'Recall (Macro)': round(metrics['recall_macro'] * 100, 2),
         'F1-Score (Macro)': round(metrics['f1_macro'] * 100, 2),
+        'False Alarm Rate (%)': round(metrics.get('false_alarm_rate', 0.0) * 100, 2),
+        'Detection Rate (%)': round(metrics.get('detection_rate', 0.0) * 100, 2),
+        'MCC': round(metrics.get('mcc', 0.0), 4),
+        'Inference Latency (ms)': round(metrics.get('inference_latency_ms', 0.0), 4),
+        'Throughput (Packets/Sec)': round(metrics.get('throughput_pps', 0.0), 2),
         'Precision (Weighted)': round(metrics['precision_weighted'] * 100, 2),
         'Recall (Weighted)': round(metrics['recall_weighted'] * 100, 2),
         'F1-Score (Weighted)': round(metrics['f1_weighted'] * 100, 2)
