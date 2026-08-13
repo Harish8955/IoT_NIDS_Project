@@ -111,16 +111,28 @@ def save_experiment_results(exp_name, metrics, y_true, y_pred, train_accs, train
     exp_dir = os.path.join("results", exp_name)
     os.makedirs(exp_dir, exist_ok=True)
 
-    # 1. Save Confusion Matrix
+    # 1. Save Confusion Matrix (Raw Counts & Normalized)
     cm = confusion_matrix(y_true, y_pred)
     plt.figure(figsize=(9, 7))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', xticklabels=class_names, yticklabels=class_names)
-    plt.title(f"Confusion Matrix — {exp_name}")
+    plt.title(f"Confusion Matrix (Raw Counts) — {exp_name}")
     plt.xlabel("Predicted Label (P)")
     plt.ylabel("True Label (T)")
     plt.tight_layout()
     cm_path = os.path.join(exp_dir, "confusion_matrix.png")
     plt.savefig(cm_path, dpi=300)
+    plt.close()
+
+    # 1b. Save Normalized Confusion Matrix (Percentages)
+    cm_norm = cm.astype('float') / (cm.sum(axis=1)[:, np.newaxis] + 1e-10)
+    plt.figure(figsize=(9, 7))
+    sns.heatmap(cm_norm, annot=True, fmt='.2f', cmap='Blues', xticklabels=class_names, yticklabels=class_names)
+    plt.title(f"Normalized Confusion Matrix (%) — {exp_name}")
+    plt.xlabel("Predicted Label (P)")
+    plt.ylabel("True Label (T)")
+    plt.tight_layout()
+    cm_norm_path = os.path.join(exp_dir, "confusion_matrix_normalized.png")
+    plt.savefig(cm_norm_path, dpi=300)
     plt.close()
 
     # 2. Save Training Curves
