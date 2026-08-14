@@ -6,6 +6,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, matthews_corrcoef
 
+from sklearn.metrics import matthews_corrcoef
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+
 # =====================================================================
 # EXACT PAPER PUBLISHED BENCHMARK RESULTS (WANG ET AL., 2024)
 # =====================================================================

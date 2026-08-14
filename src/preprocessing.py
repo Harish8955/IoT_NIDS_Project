@@ -12,6 +12,10 @@ class TrafficDataPreprocessor:
         self.feature_maxs = None
         self.feature_cols = []
 
+    def _sanitize_matrix(self, X_mat):
+        """Replaces NaN, +Inf, -Inf with 0.0"""
+        return np.nan_to_num(X_mat, nan=0.0, posinf=0.0, neginf=0.0)
+
     def fit_transform(self, df, hide_class=None):
         """
         Preprocesses raw tabular traffic data.
@@ -27,9 +31,9 @@ class TrafficDataPreprocessor:
 
         if self.target_col in df.columns:
             df[self.target_col] = df[self.target_col].astype(str).str.strip()
-            df = df[~df[self.target_col].isin(['Analysis', 'Backdoor', 'Backdoors', 'nan', '0', '0.0'])]
+            df = df[~df[self.target_col].isin(['Analysis', 'Backdoor', 'Backdoors', 'nan', '0', '0.0', 'Label', 'label'])]
 
-        df = df.fillna(0)
+        df = df.replace([np.inf, -np.inf], np.nan).fillna(0)
 
         zero_day_df = None
         if hide_class and self.target_col in df.columns:
@@ -49,22 +53,30 @@ class TrafficDataPreprocessor:
 
         X_encoded = pd.DataFrame()
         for col in self.feature_cols:
-            if X_df[col].dtype == 'object' or isinstance(X_df[col].iloc[0], str):
-                le = LabelEncoder()
-                X_encoded[col] = le.fit_transform(X_df[col].astype(str))
-                self.label_encoders[col] = le
+            if X_df[col].dtype == 'object' or (len(X_df[col]) > 0 and isinstance(X_df[col].iloc[0], str)):
+                # Try numeric conversion first in case numbers are formatted as strings
+                num_conv = pd.to_numeric(X_df[col], errors='coerce')
+                if num_conv.notna().sum() > (0.5 * len(X_df[col])):
+                    X_encoded[col] = num_conv.replace([np.inf, -np.inf], np.nan).fillna(0)
+                else:
+                    le = LabelEncoder()
+                    X_encoded[col] = le.fit_transform(X_df[col].astype(str))
+                    self.label_encoders[col] = le
             else:
-                X_encoded[col] = pd.to_numeric(X_df[col], errors='coerce').fillna(0)
+                X_encoded[col] = pd.to_numeric(X_df[col], errors='coerce').replace([np.inf, -np.inf], np.nan).fillna(0)
 
-        X_mat = X_encoded.values.astype(np.float32)
+        X_mat = self._sanitize_matrix(X_encoded.values.astype(np.float32))
 
         self.feature_mins = np.min(X_mat, axis=0)
         self.feature_maxs = np.max(X_mat, axis=0)
         
         denom = (self.feature_maxs - self.feature_mins)
-        denom[denom == 0] = 1e-6
+        denom[denom == 0] = 1.0
+        denom[np.isnan(denom)] = 1.0
+        denom[np.isinf(denom)] = 1.0
 
         X_norm = ((X_mat - self.feature_mins) / denom) * 255.0
+        X_norm = self._sanitize_matrix(X_norm)
 
         return X_norm, y, zero_day_df
 
@@ -81,12 +93,11 @@ class TrafficDataPreprocessor:
 
         if self.target_col in df.columns:
             df[self.target_col] = df[self.target_col].astype(str).str.strip()
-            df = df[~df[self.target_col].isin(['Analysis', 'Backdoor', 'Backdoors', 'nan', '0', '0.0'])]
+            df = df[~df[self.target_col].isin(['Analysis', 'Backdoor', 'Backdoors', 'nan', '0', '0.0', 'Label', 'label'])]
 
-        df = df.fillna(0)
+        df = df.replace([np.inf, -np.inf], np.nan).fillna(0)
 
         if self.target_col in df.columns:
-            # Drop unseen target classes not present in training target encoder
             valid_classes = set(self.target_encoder.classes_)
             df = df[df[self.target_col].isin(valid_classes)]
             y = self.target_encoder.transform(df[self.target_col])
@@ -104,14 +115,19 @@ class TrafficDataPreprocessor:
                         lambda s: le.transform([s])[0] if s in le.classes_ else 0
                     )
                 else:
-                    X_encoded[col] = pd.to_numeric(X_df[col], errors='coerce').fillna(0)
+                    X_encoded[col] = pd.to_numeric(X_df[col], errors='coerce').replace([np.inf, -np.inf], np.nan).fillna(0)
             else:
                 X_encoded[col] = 0
 
-        X_mat = X_encoded.values.astype(np.float32)
+        X_mat = self._sanitize_matrix(X_encoded.values.astype(np.float32))
+        
         denom = (self.feature_maxs - self.feature_mins)
-        denom[denom == 0] = 1e-6
+        denom[denom == 0] = 1.0
+        denom[np.isnan(denom)] = 1.0
+        denom[np.isinf(denom)] = 1.0
+
         X_norm = ((X_mat - self.feature_mins) / denom) * 255.0
+        X_norm = self._sanitize_matrix(X_norm)
 
         return X_norm, y
 
@@ -129,4 +145,3 @@ def prepare_official_split(train_df, test_df, target_col='attack_cat', hide_clas
     X_train, y_train, zero_day_df = preprocessor.fit_transform(train_df, hide_class=hide_class)
     X_test, y_test = preprocessor.transform(test_df)
     return X_train, X_test, y_train, y_test, preprocessor, zero_day_df
-
