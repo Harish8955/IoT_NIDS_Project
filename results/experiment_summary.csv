@@ -1,3 +1,5 @@
 Experiment,Train Accuracy,Test Accuracy,Precision (Macro),Recall (Macro),F1-Score (Macro),Precision (Weighted),Recall (Weighted),F1-Score (Weighted),False Alarm Rate (%),Detection Rate (%),MCC,Inference Latency (ms),Throughput (Packets/Sec)
 unsw_nb15_proposed_balanced_100ep,88.06,86.92,87.89,83.2,83.75,88.44,86.92,86.39,,,,,
 cic_ids2018_proposed_balanced_50ep,98.87,97.94,97.98,98.1,98.01,98.01,97.94,97.95,0.15,98.1,0.9775,0.0331,30247.38
+cic_ids2018_proposed_balanced_100ep,99.07,98.34,98.46,98.63,98.54,98.37,98.34,98.35,0.12,98.63,0.9819,0.034,29409.9
+cic_ids2018_proposed_balanced_200ep,99.21,98.93,98.97,99.17,99.06,98.96,98.93,98.94,0.08,99.17,0.9883,0.0329,30411.23
