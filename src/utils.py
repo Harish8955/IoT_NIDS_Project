@@ -6,6 +6,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix, matthews_corrcoef
 
+from sklearn.metrics import matthews_corrcoef
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
+
 # =====================================================================
 # EXACT PAPER PUBLISHED BENCHMARK RESULTS (WANG ET AL., 2024)
 # =====================================================================
@@ -177,12 +180,9 @@ def save_experiment_results(exp_name, metrics, y_true, y_pred, train_accs, train
         # Overwrite row if experiment already ran, else append
         summary_df = summary_df[summary_df['Experiment'] != exp_name]
         summary_df = pd.concat([summary_df, pd.DataFrame([row_data])], ignore_index=True)
-    try:
-        summary_df.to_csv(summary_csv, index=False)
-        print(f"Results for '{exp_name}' successfully organized & saved to: {exp_dir}")
-        print(f"Master summary updated at: {summary_csv}")
-    except PermissionError:
-        backup_csv = os.path.join("results", f"experiment_summary_backup.csv")
-        summary_df.to_csv(backup_csv, index=False)
-        print(f"Results for '{exp_name}' successfully organized & saved to: {exp_dir}")
-        print(f"⚠️ WARNING: '{summary_csv}' is open in Excel! Saved backup to: {backup_csv}")
+    else:
+        summary_df = pd.DataFrame([row_data])
+
+    summary_df.to_csv(summary_csv, index=False)
+    print(f"Results for '{exp_name}' successfully organized & saved to: {exp_dir}")
+    print(f"Master summary updated at: {summary_csv}")
