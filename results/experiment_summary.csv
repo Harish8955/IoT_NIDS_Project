@@ -1,4 +1,10 @@
 Experiment,Train Accuracy,Test Accuracy,Precision (Macro),Recall (Macro),F1-Score (Macro),Precision (Weighted),Recall (Weighted),F1-Score (Weighted),False Alarm Rate (%),Detection Rate (%),MCC,Inference Latency (ms),Throughput (Packets/Sec)
 unsw_nb15_proposed_balanced_100ep,88.06,86.92,87.89,83.2,83.75,88.44,86.92,86.39,,,,,
 cic_ids2018_proposed_balanced_50ep,98.87,97.94,97.98,98.1,98.01,98.01,97.94,97.95,0.15,98.1,0.9775,0.0331,30247.38
-unsw_nb15_proposed_balanced_200ep,88.24,87.16,86.52,83.26,84.16,87.34,87.16,86.69,1.91,83.26,0.8479,0.0479,20864.84
+unsw_nb15_proposed_balanced_200ep,88.28,87.16,86.75,83.64,84.62,87.61,87.16,86.92,1.9,83.64,0.848,0.0474,21108.19
+unsw_nb15_cnn_balanced_50ep,85.67,85.67,84.76,81.48,82.09,85.97,85.67,85.05,2.12,81.48,0.8305,0.0231,43370.99
+unsw_nb15_cnn_balanced_100ep,86.15,85.49,83.71,82.57,83.01,85.69,85.49,85.5,2.12,82.57,0.8273,0.0219,45582.58
+unsw_nb15_cnn_balanced_200ep,86.81,86.36,86.94,81.87,82.98,87.17,86.36,85.69,2.04,81.87,0.8394,0.0216,46250.38
+unsw_nb15_resnet_balanced_50ep,84.13,83.27,82.34,79.97,80.1,84.47,83.27,83.11,2.44,79.97,0.8029,0.0198,50486.46
+unsw_nb15_resnet_balanced_100ep,84.94,84.07,81.47,81.38,81.01,84.38,84.07,83.94,2.3,81.38,0.8114,0.0198,50536.25
+unsw_nb15_resnet_balanced_200ep,85.05,85.04,83.63,81.16,82.03,85.17,85.04,84.83,2.21,81.16,0.8218,0.0219,45567.45

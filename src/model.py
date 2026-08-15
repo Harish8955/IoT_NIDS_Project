@@ -188,10 +188,12 @@ def get_model(model_name, input_features, num_classes):
         return CNN1D(input_features, num_classes)
     elif model_name == 'resnet':
         return ResNet1D(input_features, num_classes)
+    elif model_name == 'resnest':
+        return IoT_NIDS_Net(input_features, num_classes)
     elif model_name in ['resnet-gru', 'resnet-bigru']:
         return ResNetGRU1D(input_features, num_classes)
     else:
-        raise ValueError(f"Unknown model name '{model_name}'. Choose from: proposed, dual-engine, cnn, resnet, resnet-gru")
+        raise ValueError(f"Unknown model name '{model_name}'. Choose from: proposed, dual-engine, cnn, resnet, resnest, resnet-gru")
 
 
 # =====================================================================

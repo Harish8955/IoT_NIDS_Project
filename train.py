@@ -184,7 +184,7 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', type=str, default='data/unsw_nb15_sample.csv', help='Path to training dataset CSV')
     parser.add_argument('--test_dataset', type=str, default=None, help='Path to official testing dataset CSV (optional)')
     parser.add_argument('--dataset_name', type=str, default='UNSW-NB15', choices=['UNSW-NB15', 'CIC-IDS2018', 'CIC-IOT2023'], help='Dataset benchmark name')
-    parser.add_argument('--model', type=str, default='proposed', choices=['proposed', 'dual-engine', 'cnn', 'resnet', 'resnet-gru'], help='Model architecture to evaluate')
+    parser.add_argument('--model', type=str, default='proposed', choices=['proposed', 'dual-engine', 'cnn', 'resnet', 'resnest', 'resnet-gru'], help='Model architecture to evaluate')
     parser.add_argument('--target_col', type=str, default='attack_cat', help='Target label column name')
     parser.add_argument('--epochs', type=int, default=50, help='Number of training epochs (50, 100, 200)')
     parser.add_argument('--batch_size', type=int, default=64, help='Batch size')

@@ -1,0 +1,15 @@
+{
+    "accuracy": 0.850401905328967,
+    "precision_macro": 0.8363118423476014,
+    "recall_macro": 0.8116039321813378,
+    "f1_macro": 0.8203256253995255,
+    "detection_rate": 0.8116039321813378,
+    "false_alarm_rate": 0.02207623491924013,
+    "mcc": 0.8218203926038646,
+    "precision_weighted": 0.8517235548110171,
+    "recall_weighted": 0.850401905328967,
+    "f1_weighted": 0.8482888483942248,
+    "train_accuracy": 0.8504964348978103,
+    "inference_latency_ms": 0.021945489734082963,
+    "throughput_pps": 45567.44971824103
+}
