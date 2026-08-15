@@ -1,15 +1,15 @@
 {
-    "accuracy": 0.8506557335730549,
-    "precision_macro": 0.836982532600062,
-    "recall_macro": 0.8090928595978163,
-    "f1_macro": 0.8109603878830028,
-    "detection_rate": 0.8090928595978163,
-    "false_alarm_rate": 0.01929848555272083,
-    "mcc": 0.8274172104773918,
-    "precision_weighted": 0.8495500463948396,
-    "recall_weighted": 0.8506557335730549,
-    "f1_weighted": 0.8408664538986794,
-    "train_accuracy": 0.8587475451843606,
-    "inference_latency_ms": 0.02283214790646589,
-    "throughput_pps": 43797.89427155944
+    "accuracy": 0.8675647514141114,
+    "precision_macro": 0.8602033498836942,
+    "recall_macro": 0.8320839736901767,
+    "f1_macro": 0.8394698827407254,
+    "detection_rate": 0.8320839736901767,
+    "false_alarm_rate": 0.019549542489269774,
+    "mcc": 0.8431524339560998,
+    "precision_weighted": 0.8708651450450602,
+    "recall_weighted": 0.8675647514141114,
+    "f1_weighted": 0.8640901132242983,
+    "train_accuracy": 0.8712990666726209,
+    "inference_latency_ms": 0.024416578706796414,
+    "throughput_pps": 40955.778940546144
 }
