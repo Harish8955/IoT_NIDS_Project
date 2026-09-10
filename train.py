@@ -75,6 +75,7 @@ def train_and_evaluate(args):
     # Step 6: Training Loop
     print(f"\n--- STAGE: Training Model for {args.epochs} Epochs ---")
     train_accs, train_losses = [], []
+    test_accs, test_losses = [], []
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -85,7 +86,7 @@ def train_and_evaluate(args):
             
             optimizer.zero_grad()
             if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
-                outputs, _, _ = model(X_batch)
+                outputs, _, _, _ = model(X_batch)
             else:
                 outputs = model(X_batch)
 
@@ -103,8 +104,29 @@ def train_and_evaluate(args):
         train_losses.append(epoch_loss)
         train_accs.append(epoch_acc)
 
+        # Per-Epoch Evaluation on Test Set for Test Curves
+        model.eval()
+        t_running_loss, t_correct, t_total = 0.0, 0, 0
+        with torch.no_grad():
+            for X_tbatch, y_tbatch in test_loader:
+                X_tbatch, y_tbatch = X_tbatch.to(device), y_tbatch.to(device)
+                if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
+                    t_outputs, _, _, _ = model(X_tbatch)
+                else:
+                    t_outputs = model(X_tbatch)
+                t_loss = criterion(t_outputs, y_tbatch)
+                t_running_loss += t_loss.item() * X_tbatch.size(0)
+                _, t_preds = torch.max(t_outputs, 1)
+                t_total += y_tbatch.size(0)
+                t_correct += (t_preds == y_tbatch).sum().item()
+
+        epoch_test_loss = t_running_loss / t_total
+        epoch_test_acc = t_correct / t_total
+        test_losses.append(epoch_test_loss)
+        test_accs.append(epoch_test_acc)
+
         if epoch % max(1, args.epochs // 10) == 0 or epoch == args.epochs:
-            print(f"Epoch [{epoch}/{args.epochs}] | Loss: {epoch_loss:.4f} | Accuracy: {epoch_acc * 100:.2f}%")
+            print(f"Epoch [{epoch}/{args.epochs}] | Train Loss: {epoch_loss:.4f} | Train Acc: {epoch_acc * 100:.2f}% | Test Loss: {epoch_test_loss:.4f} | Test Acc: {epoch_test_acc * 100:.2f}%")
 
     # Step 7: Evaluation on Test Set
     print("\n--- STAGE: Evaluation on Real Test Set ---")
@@ -117,7 +139,7 @@ def train_and_evaluate(args):
         for X_batch, y_batch in test_loader:
             X_batch = X_batch.to(device)
             if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
-                outputs, _, _ = model(X_batch)
+                outputs, _, _, _ = model(X_batch)
             else:
                 outputs = model(X_batch)
 
@@ -131,15 +153,24 @@ def train_and_evaluate(args):
 
     metrics = compute_metrics(y_trues, y_preds)
     metrics['train_accuracy'] = train_accs[-1] if train_accs else 0.0
+    metrics['test_accuracy'] = metrics['accuracy']
     metrics['inference_latency_ms'] = latency_ms
     metrics['throughput_pps'] = throughput_pps
 
-    print(f"\n✅ FINAL TRAIN ACCURACY: {metrics['train_accuracy'] * 100:.2f}%")
-    print(f"✅ FINAL TEST ACCURACY : {metrics['accuracy'] * 100:.2f}%")
-    print(f"⚡ FALSE ALARM RATE (FAR) : {metrics['false_alarm_rate'] * 100:.2f}%")
-    print(f"⚡ DETECTION RATE (DR)   : {metrics['detection_rate'] * 100:.2f}%")
-    print(f"⚡ INFERENCE LATENCY     : {latency_ms:.4f} ms / packet")
-    print(f"⚡ THROUGHPUT            : {throughput_pps:.2f} Packets / Sec")
+    print(f"\n==================================================")
+    print(f"    EVALUATION METRICS (TEST SET RESULTS)")
+    print(f"==================================================")
+    print(f"  [+] FINAL TRAIN ACCURACY   : {metrics['train_accuracy'] * 100:.2f}%")
+    print(f"  [+] FINAL TEST ACCURACY    : {metrics['test_accuracy'] * 100:.2f}%")
+    print(f"  [*] TEST MACRO PRECISION   : {metrics['precision_macro'] * 100:.2f}%")
+    print(f"  [*] TEST MACRO RECALL      : {metrics['recall_macro'] * 100:.2f}%")
+    print(f"  [*] TEST MACRO F1-SCORE    : {metrics['f1_macro'] * 100:.2f}%")
+    print(f"  [*] FALSE ALARM RATE (FAR) : {metrics['false_alarm_rate'] * 100:.2f}%")
+    print(f"  [*] DETECTION RATE (DR)   : {metrics['detection_rate'] * 100:.2f}%")
+    print(f"  [*] MATTHEWS CORR (MCC)    : {metrics['mcc']:.4f}")
+    print(f"  [*] INFERENCE LATENCY     : {latency_ms:.4f} ms / packet")
+    print(f"  [*] THROUGHPUT            : {throughput_pps:.2f} Packets / Sec")
+    print(f"==================================================\n")
 
     # Step 8: LOCO Zero-Day Evaluation (If hide_class specified)
     if zero_day_df is not None and len(zero_day_df) > 0:
@@ -151,14 +182,17 @@ def train_and_evaluate(args):
         
         with torch.no_grad():
             if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
-                logits, is_zero_day, recon_loss = model(X_zd_tensor)
+                logits, is_zero_day, recon_loss, p_max = model(X_zd_tensor)
                 detected = is_zero_day.sum().item()
                 total_zd = len(X_zd_tensor)
-                print(f"🛡️ DUAL-ENGINE ZERO-DAY GUARD RESULTS:")
-                print(f"   Hidden Attack Tested        : '{args.hide_class}' ({total_zd} samples)")
-                print(f"   Reconstruction Threshold (tau): {model.tau_threshold}")
-                print(f"   Avg Reconstruction Loss     : {recon_loss.mean().item():.4f}")
-                print(f"   Zero-Day Threats Detected   : {detected} / {total_zd} ({detected/total_zd*100:.2f}%)")
+                print(f"  [GUARD] DUAL-ENGINE ZERO-DAY GUARD RESULTS:")
+                print(f"   Hidden Attack Tested            : '{args.hide_class}' ({total_zd} samples)")
+                print(f"   Reconstruction Threshold (tau) : {model.tau_threshold}")
+                print(f"   Confidence Threshold (theta)   : {model.theta_threshold}")
+                print(f"   Avg Reconstruction Loss        : {recon_loss.mean().item():.4f}")
+                print(f"   Avg Classifier Confidence P_max: {p_max.mean().item():.4f}")
+                pct = (detected / total_zd * 100) if total_zd > 0 else 0.0
+                print(f"   Zero-Day Threats Detected      : {detected} / {total_zd} ({pct:.2f}%)")
             else:
                 outputs = model(X_zd_tensor)
                 _, preds = torch.max(outputs, 1)
@@ -167,13 +201,14 @@ def train_and_evaluate(args):
                     normal_idx = list(class_names).index('Normal')
                 misclassified_as_normal = (preds == normal_idx).sum().item()
                 total_zd = len(X_zd_tensor)
-                print(f"❌ SUPERVISED MODEL ZERO-DAY RESULTS (No Engine 1):")
+                pct_misc = (misclassified_as_normal / total_zd * 100) if total_zd > 0 else 0.0
+                print(f"  [WARN] SUPERVISED MODEL ZERO-DAY RESULTS (No Engine 1):")
                 print(f"   Hidden Attack Tested        : '{args.hide_class}' ({total_zd} samples)")
-                print(f"   Misclassified as Normal     : {misclassified_as_normal} / {total_zd} ({misclassified_as_normal/total_zd*100:.2f}%)")
+                print(f"   Misclassified as Normal     : {misclassified_as_normal} / {total_zd} ({pct_misc:.2f}%)")
         print("======================================================================\n")
 
     # Step 9: Save & Organize Results
-    save_experiment_results(exp_name, metrics, y_trues, y_preds, train_accs, train_losses, class_names)
+    save_experiment_results(exp_name, metrics, y_trues, y_preds, train_accs, train_losses, class_names, test_accs=test_accs, test_losses=test_losses)
 
     # Step 10: Print Side-by-Side Paper Comparison
     epoch_key = f"{args.epochs}epoch"

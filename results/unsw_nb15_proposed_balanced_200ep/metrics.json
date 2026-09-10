@@ -11,5 +11,6 @@
     "f1_weighted": 0.8692224996040654,
     "train_accuracy": 0.8828316884740767,
     "inference_latency_ms": 0.04737497831107818,
-    "throughput_pps": 21108.18908314222
+    "throughput_pps": 21108.18908314222,
+    "test_accuracy": 0.8715838047037809
 }

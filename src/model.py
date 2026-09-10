@@ -244,19 +244,54 @@ class DualEngineIoT_NIDS(nn.Module):
     COMPLETE DUAL-ENGINE HYBRID ARCHITECTURE:
     - Engine 1: Unsupervised Zero-Day Guard (Reconstruction Autoencoder)
     - Engine 2: Supervised Known Attack Classifier (1D ResNeSt + BiGRU)
+    - Dual Gates: Reconstruction Threshold (tau = 0.0191) & Confidence Threshold (theta = 0.85)
     """
-    def __init__(self, input_features, num_classes, tau_threshold=0.0191):
+    def __init__(self, input_features, num_classes, tau_threshold=0.0191, theta_threshold=0.85):
         super(DualEngineIoT_NIDS, self).__init__()
         self.engine1_zero_day_guard = Engine1_ZeroDayAutoencoder(input_features)
         self.engine2_classifier = IoT_NIDS_Net(input_features, num_classes)
         self.tau_threshold = tau_threshold
+        self.theta_threshold = theta_threshold
 
     def forward(self, x):
-        # Engine 1 Zero-Day Check
+        # Engine 1 Anomaly Check (Reconstruction Loss)
         recon_loss, latent = self.engine1_zero_day_guard.compute_anomaly_score(x)
-        is_zero_day = recon_loss > self.tau_threshold
         
-        # Engine 2 Multi-Class Logits
+        # Engine 2 Multi-Class Classifier & Softmax Confidence
         class_logits = self.engine2_classifier(x)
-        return class_logits, is_zero_day, recon_loss
+        probs = F.softmax(class_logits, dim=-1)
+        p_max, _ = torch.max(probs, dim=-1)
+        
+        # Dual Gate Decision Rule:
+        # Gate 1: L_recon > tau (Anomalous / Non-benign traffic)
+        # Gate 2: P_max < theta (Low prediction confidence / Novel attack variant)
+        is_anomaly = recon_loss > self.tau_threshold
+        is_low_confidence = p_max < self.theta_threshold
+        
+        # Zero-Day Threat is flagged when traffic is anomalous AND Engine 2 is uncertain
+        is_zero_day = is_anomaly & is_low_confidence
+
+        return class_logits, is_zero_day, recon_loss, p_max
+
+    def predict_verdict(self, x):
+        """
+        Returns 3-way Security Verdict for each input sample:
+        - 0: BENIGN NORMAL TRAFFIC (L_recon <= tau)
+        - 1: KNOWN ATTACK CLASS (L_recon > tau AND P_max >= theta)
+        - 2: ZERO-DAY THREAT ALERT (L_recon > tau AND P_max < theta)
+        """
+        class_logits, is_zero_day, recon_loss, p_max = self.forward(x)
+        _, preds = torch.max(class_logits, dim=-1)
+        
+        verdicts = torch.zeros(x.size(0), dtype=torch.long, device=x.device)
+        is_anomaly = recon_loss > self.tau_threshold
+        
+        # Known Attack: Anomaly + High Confidence
+        verdicts[is_anomaly & (p_max >= self.theta_threshold)] = 1
+        
+        # Zero-Day Threat: Anomaly + Low Confidence
+        verdicts[is_zero_day] = 2
+        
+        return verdicts, preds, p_max, recon_loss
+
 

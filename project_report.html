@@ -1,0 +1,770 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>IoT NIDS Project Report – Amrita Vishwa Vidyapeetham</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+
+  :root {
+    --navy: #0F284F;
+    --blue: #2163EB;
+    --teal: #06B6D4;
+    --green: #10B981;
+    --orange: #F59E0B;
+    --red: #EF4444;
+    --slate: #475569;
+    --lgray: #E2E8F0;
+    --offwht: #F8FAFC;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', sans-serif;
+    color: #1E293B;
+    background: #fff;
+    font-size: 15px;
+    line-height: 1.75;
+  }
+
+  /* ── COVER PAGE ── */
+  .cover {
+    background: var(--navy);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding: 60px 80px;
+    page-break-after: always;
+    position: relative;
+    overflow: hidden;
+  }
+  .cover::before {
+    content: '';
+    position: absolute;
+    top: -120px; right: -120px;
+    width: 500px; height: 500px;
+    border-radius: 50%;
+    background: rgba(6,182,212,0.08);
+  }
+  .cover::after {
+    content: '';
+    position: absolute;
+    bottom: -80px; left: -80px;
+    width: 380px; height: 380px;
+    border-radius: 50%;
+    background: rgba(33,99,235,0.12);
+  }
+  .cover-tag {
+    font-size: 13px; font-weight: 600; letter-spacing: 3px;
+    color: var(--teal); text-transform: uppercase; margin-bottom: 28px;
+  }
+  .cover h1 {
+    font-size: 44px; font-weight: 700; color: #fff; line-height: 1.2;
+    margin-bottom: 20px; max-width: 760px;
+  }
+  .cover-line { width: 80px; height: 4px; background: var(--blue); margin-bottom: 28px; }
+  .cover-sub { font-size: 16px; color: #94A3B8; margin-bottom: 48px; max-width: 600px; }
+  .cover-meta { display: flex; gap: 40px; flex-wrap: wrap; margin-bottom: 52px; }
+  .cover-meta-item label { display: block; font-size: 11px; color: var(--teal); font-weight: 600; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 4px; }
+  .cover-meta-item span { color: #fff; font-size: 15px; font-weight: 500; }
+  .team-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; max-width: 860px; }
+  .team-card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); border-top: 3px solid var(--blue); border-radius: 8px; padding: 16px 18px; }
+  .team-card .name { color: #fff; font-weight: 600; font-size: 14px; }
+  .team-card .roll { color: var(--teal); font-size: 12px; margin-top: 4px; }
+
+  /* ── CONTENT ── */
+  .page { padding: 56px 80px; max-width: 1000px; margin: 0 auto; }
+
+  h2.section-title {
+    font-size: 28px; font-weight: 700; color: var(--navy);
+    border-left: 5px solid var(--blue); padding-left: 18px;
+    margin-bottom: 28px; margin-top: 48px;
+  }
+  h3.sub-title {
+    font-size: 20px; font-weight: 600; color: var(--navy);
+    margin-top: 32px; margin-bottom: 14px;
+    display: flex; align-items: center; gap: 10px;
+  }
+  h3.sub-title::before {
+    content: ''; display: inline-block;
+    width: 16px; height: 4px; background: var(--teal); border-radius: 2px;
+  }
+  h4 {
+    font-size: 16px; font-weight: 600; color: var(--blue);
+    margin-top: 20px; margin-bottom: 8px;
+  }
+
+  p { color: var(--slate); margin-bottom: 14px; }
+
+  ul { margin: 10px 0 18px 0; padding-left: 0; list-style: none; }
+  ul li {
+    color: var(--slate); padding: 6px 0 6px 24px;
+    position: relative; border-bottom: 1px solid #f1f5f9;
+  }
+  ul li::before {
+    content: '▸'; position: absolute; left: 0;
+    color: var(--blue); font-size: 14px;
+  }
+
+  .callout {
+    border-radius: 10px; padding: 20px 24px;
+    margin: 24px 0; border-left: 5px solid var(--blue);
+  }
+  .callout.navy { background: var(--navy); color: #fff; border-color: var(--teal); }
+  .callout.navy p { color: #CBD5E1; }
+  .callout.blue { background: #EFF6FF; border-color: var(--blue); }
+  .callout.orange { background: #FFFBEB; border-color: var(--orange); }
+  .callout.red { background: #FEF2F2; border-color: var(--red); }
+  .callout.teal { background: #F0FDFA; border-color: var(--teal); }
+  .callout.green { background: #F0FDF4; border-color: var(--green); }
+  .callout-title { font-weight: 700; font-size: 16px; margin-bottom: 8px; }
+  .callout.navy .callout-title { color: var(--teal); }
+  .callout.blue .callout-title { color: var(--blue); }
+  .callout.orange .callout-title { color: var(--orange); }
+  .callout.red .callout-title { color: var(--red); }
+  .callout.teal .callout-title { color: var(--teal); }
+  .callout.green .callout-title { color: var(--green); }
+
+  /* Architecture Diagram */
+  .arch-diagram {
+    background: var(--offwht); border: 1px solid var(--lgray);
+    border-radius: 12px; padding: 28px; margin: 24px 0;
+    font-family: 'JetBrains Mono', monospace;
+  }
+  .arch-flow {
+    display: flex; align-items: center; flex-wrap: wrap;
+    gap: 0; justify-content: center; margin: 12px 0;
+  }
+  .arch-box {
+    border-radius: 8px; padding: 10px 16px; text-align: center;
+    font-size: 12px; font-weight: 600; min-width: 110px;
+    color: #fff;
+  }
+  .arch-box.input  { background: #475569; }
+  .arch-box.conv   { background: var(--blue); }
+  .arch-box.split  { background: var(--orange); color: #1E293B; }
+  .arch-box.resid  { background: var(--green); }
+  .arch-box.fgru   { background: var(--blue); }
+  .arch-box.bgru   { background: var(--teal); color: #1E293B; }
+  .arch-box.merge  { background: var(--orange); color: #1E293B; }
+  .arch-box.soft   { background: var(--navy); }
+  .arch-box.ae     { background: var(--red); }
+  .arch-box.check  { background: var(--orange); color: #1E293B; }
+  .arch-box.flag   { background: var(--red); }
+  .arch-box.cls    { background: var(--navy); }
+  .arch-arrow { color: var(--blue); font-size: 22px; padding: 0 6px; font-family: 'Inter', sans-serif; }
+  .arch-sub { font-size: 10px; font-weight: 400; color: rgba(255,255,255,0.75); display: block; margin-top: 3px; }
+  .arch-sub.dark { color: rgba(0,0,0,0.5); }
+
+  .bigru-row { display: flex; flex-direction: column; gap: 8px; margin: 16px 0; }
+  .bigru-packets { display: flex; gap: 8px; justify-content: center; }
+  .pkt { background: #475569; color: #fff; border-radius: 6px; padding: 8px 14px; font-size: 13px; font-weight: 600; font-family: 'JetBrains Mono', monospace; }
+  .gru-bar { border-radius: 8px; padding: 12px 20px; text-align: center; font-size: 13px; font-weight: 600; color: #fff; margin: 0 12px; }
+  .gru-bar.fwd { background: var(--blue); }
+  .gru-bar.bwd { background: var(--teal); color: #1E293B; }
+  .gru-label { font-size: 11px; font-weight: 400; opacity: 0.8; display: block; margin-top: 2px; }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; margin: 20px 0; font-size: 13.5px; }
+  thead tr { background: var(--navy); color: #fff; }
+  thead th { padding: 12px 14px; text-align: left; font-weight: 600; font-size: 13px; }
+  tbody tr:nth-child(even) { background: var(--offwht); }
+  tbody tr:nth-child(odd) { background: #fff; }
+  tbody tr:first-child { background: #EFF6FF; font-weight: 600; }
+  tbody td { padding: 11px 14px; color: var(--slate); border-bottom: 1px solid var(--lgray); }
+
+  .tag { display: inline-block; padding: 2px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+  .tag.blue { background: #DBEAFE; color: var(--blue); }
+  .tag.green { background: #D1FAE5; color: #065F46; }
+  .tag.orange { background: #FEF3C7; color: #92400E; }
+
+  /* Dataset cards */
+  .ds-cards { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin: 20px 0; }
+  .ds-card { border-radius: 10px; overflow: hidden; border: 1px solid var(--lgray); }
+  .ds-card-header { padding: 14px 18px; font-weight: 700; font-size: 15px; color: #fff; }
+  .ds-card-header.blue { background: var(--blue); }
+  .ds-card-header.teal { background: var(--teal); color: #1E293B; }
+  .ds-card-header.orange { background: var(--orange); color: #1E293B; }
+  .ds-card-body { padding: 14px 18px; background: #fff; }
+  .ds-stat { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--lgray); font-size: 13px; }
+  .ds-stat:last-child { border-bottom: none; }
+  .ds-stat label { color: #64748B; }
+  .ds-stat span { font-weight: 600; color: var(--navy); }
+
+  /* Page break */
+  .page-break { page-break-before: always; }
+
+  /* Step boxes */
+  .step { display: flex; gap: 18px; margin: 18px 0; align-items: flex-start; }
+  .step-num { background: var(--blue); color: #fff; border-radius: 50%; width: 34px; height: 34px; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 16px; flex-shrink: 0; margin-top: 2px; }
+  .step-content { flex: 1; }
+  .step-content h4 { margin-top: 0; }
+  .step-content p { margin-bottom: 0; }
+
+  /* Divider */
+  .divider { border: none; border-top: 2px solid var(--lgray); margin: 40px 0; }
+
+  @media print {
+    body { font-size: 13px; }
+    .cover { page-break-after: always; }
+    .page-break { page-break-before: always; }
+    h2.section-title { page-break-before: auto; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════ COVER ══ -->
+<div class="cover">
+  <div class="cover-tag">Technical Project Report · First Review</div>
+  <h1>A Network Intrusion Detection System Based on Deep Learning in the IoT</h1>
+  <div class="cover-line"></div>
+  <p class="cover-sub">Replicating and extending a state-of-the-art hybrid 1D ResNeSt + BiGRU classifier with a novel Zero-Day Dual-Engine architecture for real-world IoT edge deployments.</p>
+  <div class="cover-meta">
+    <div class="cover-meta-item">
+      <label>Institution</label>
+      <span>Amrita Vishwa Vidyapeetham</span>
+    </div>
+    <div class="cover-meta-item">
+      <label>Course</label>
+      <span>Introduction to Computer Networks</span>
+    </div>
+    <div class="cover-meta-item">
+      <label>Guide</label>
+      <span>Prof. Shashank Anivilla</span>
+    </div>
+    <div class="cover-meta-item">
+      <label>Date</label>
+      <span>August 17, 2026</span>
+    </div>
+  </div>
+  <div class="team-grid">
+    <div class="team-card"><div class="name">Edwin Sundaraj</div><div class="roll">CB.AI.U4QTS25020</div></div>
+    <div class="team-card"><div class="name">Anish Thondepu</div><div class="roll">CB.AI.U4QTS25045</div></div>
+    <div class="team-card"><div class="name">Lakshan</div><div class="roll">CB.AI.U4QTS25030</div></div>
+    <div class="team-card"><div class="name">Harish Srinivas</div><div class="roll">CB.AI.U4QTS25022</div></div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════ SECTION 1 ══ -->
+<div class="page">
+
+<h2 class="section-title">1. Introduction & Motivation</h2>
+
+<p>The Internet of Things (IoT) has fundamentally transformed how billions of devices communicate across global networks. Sensors, smart appliances, industrial controllers, healthcare monitors, and autonomous systems now form an expansive, heterogeneous mesh of edge devices—each constantly transmitting data over shared network infrastructure. By 2030, the number of connected IoT devices is expected to surpass 29 billion.</p>
+
+<p>However, this explosive growth has dramatically expanded the attack surface for cybercriminals. IoT devices are, by design, resource-constrained: they have limited processing power, memory, and battery life. They often run lightweight, unpatched firmware and cannot support the computational overhead of traditional security solutions. This makes them prime targets for botnet recruitment, data exfiltration, and large-scale Distributed Denial-of-Service (DDoS) attacks.</p>
+
+<div class="callout navy">
+  <div class="callout-title">Real-World Threat Example</div>
+  <p>The <strong>Mirai Botnet (2016)</strong> compromised over 600,000 IoT devices (IP cameras, DVRs, routers) and used them to generate a record-breaking 1.1 Terabit-per-second DDoS attack against Dyn DNS, taking down major sites like Twitter, Netflix, and Spotify for hours. This demonstrates that poorly secured IoT devices are not just a personal risk—they are a critical national infrastructure risk.</p>
+</div>
+
+<h3 class="sub-title">Why Existing Solutions Fail</h3>
+
+<ul>
+  <li><strong>Rule-Based Systems (Snort, Suricata):</strong> These rely on manually curated signature databases. They are completely blind to any attack that doesn't already have a known signature (zero-day attacks). They also require constant manual updates.</li>
+  <li><strong>Traditional Machine Learning (SVM, Random Forest):</strong> These require extensive, time-consuming manual feature engineering by domain experts. They scale extremely poorly when the number of features and dataset size grows, which is the norm in IoT environments.</li>
+  <li><strong>Early Deep Learning Models (LSTM, basic CNN):</strong> While better than traditional ML, they either capture only spatial features (CNNs) or only temporal sequences (LSTMs/GRUs), not both simultaneously. They also struggle catastrophically with severely imbalanced datasets where rare attacks go completely undetected.</li>
+</ul>
+
+<p>This creates a clear and urgent gap: we need an intelligent NIDS that can autonomously extract both <strong>spatial structure</strong> and <strong>temporal context</strong> from raw network packet flows, handle severe class imbalances, and eventually be capable of detecting entirely novel, never-before-seen attacks.</p>
+
+<hr class="divider">
+
+<!-- ══════════════════════════════════════════ SECTION 2 ══ -->
+<h2 class="section-title">2. Project Overview & Objectives</h2>
+
+<p>This project is structured in two distinct phases. <strong>Phase 1</strong> (the focus of this review) involves faithfully replicating and benchmarking the architecture proposed in the base paper by Wang et al. (2024), extended with additional evaluation metrics. <strong>Phase 2</strong> (future work) will introduce our novel Zero-Day Dual-Engine add-on.</p>
+
+<h3 class="sub-title">Phase 1 Objectives</h3>
+<div class="step">
+  <div class="step-num">1</div>
+  <div class="step-content">
+    <h4>Replicate the Base Paper Model</h4>
+    <p>Implement and train the exact 1D ResNeSt + BiGRU hybrid architecture as described by Wang et al. (2024), across three benchmark IoT datasets (UNSW-NB15, CIC-IDS2018, CIC-IOT2023) at 50, 100, and 200 epochs—yielding a comprehensive 45-run evaluation matrix.</p>
+  </div>
+</div>
+<div class="step">
+  <div class="step-num">2</div>
+  <div class="step-content">
+    <h4>Implement CTGAN for Class Imbalance</h4>
+    <p>Apply a Conditional Tabular GAN (CTGAN) to synthesize realistic minority-class attack samples (e.g., Worms, Shellcode) before training, to prevent the model from over-predicting the dominant "Normal" traffic class.</p>
+  </div>
+</div>
+<div class="step">
+  <div class="step-num">3</div>
+  <div class="step-content">
+    <h4>Introduce Novel Evaluation Metrics</h4>
+    <p>Go beyond the paper's reported metrics (Accuracy, F1) by additionally computing Precision, Recall, False Alarm Rate (FAR), Matthews Correlation Coefficient (MCC), per-packet Inference Latency (ms), and Throughput (Packets Per Second, PPS)—metrics that prove real-world edge-deployment viability.</p>
+  </div>
+</div>
+<div class="step">
+  <div class="step-num">4</div>
+  <div class="step-content">
+    <h4>Design the Dual-Engine Architecture</h4>
+    <p>Architect our novel Zero-Day Guard Dual-Engine model for execution in Phase 2, where an unsupervised Autoencoder sits upstream of the supervised classifier to flag unknown attacks before classification.</p>
+  </div>
+</div>
+
+<hr class="divider">
+
+<!-- ══════════════════════════════════════════ SECTION 3 ══ -->
+<h2 class="section-title">3. Datasets</h2>
+
+<p>We benchmark across three well-established, publicly available IoT and network intrusion datasets, chosen for their diversity in traffic environments, attack complexity, and dataset characteristics.</p>
+
+<div class="ds-cards">
+  <div class="ds-card">
+    <div class="ds-card-header blue">UNSW-NB15</div>
+    <div class="ds-card-body">
+      <div class="ds-stat"><label>Features</label><span>49</span></div>
+      <div class="ds-stat"><label>Attack Classes</label><span>8</span></div>
+      <div class="ds-stat"><label>Origin</label><span>Univ. of NSW</span></div>
+      <div class="ds-stat"><label>Highlight</label><span>Worms minority class</span></div>
+    </div>
+  </div>
+  <div class="ds-card">
+    <div class="ds-card-header teal">CSE-CIC-IDS2018</div>
+    <div class="ds-card-body">
+      <div class="ds-stat"><label>Features</label><span>76</span></div>
+      <div class="ds-stat"><label>Attack Classes</label><span>15</span></div>
+      <div class="ds-stat"><label>Origin</label><span>CIC Canada</span></div>
+      <div class="ds-stat"><label>Highlight</label><span>Similar-looking attacks</span></div>
+    </div>
+  </div>
+  <div class="ds-card">
+    <div class="ds-card-header orange">CIC-IOT2023</div>
+    <div class="ds-card-body">
+      <div class="ds-stat"><label>Features</label><span>47</span></div>
+      <div class="ds-stat"><label>Attack Classes</label><span>12</span></div>
+      <div class="ds-stat"><label>Origin</label><span>CIC IoT Lab</span></div>
+      <div class="ds-stat"><label>Highlight</label><span>Real IoT devices, DDoS</span></div>
+    </div>
+  </div>
+</div>
+
+<h3 class="sub-title">Dataset Processing Pipeline</h3>
+<ul>
+  <li><strong>Min-Max Normalization:</strong> All numerical features are scaled to the [0, 1] range so that features with large absolute values (e.g., byte counts) do not dominate features with small values (e.g., flag bits).</li>
+  <li><strong>Label Encoding:</strong> Categorical attack labels are converted to integer indices (0, 1, 2, ...) for the Softmax classifier.</li>
+  <li><strong>CTGAN Synthesis (Imbalance Correction):</strong> The minority attack classes are upsampled by a Conditional Tabular GAN. Unlike random oversampling (SMOTE), CTGAN generates entirely novel, statistically valid synthetic samples that follow the conditional distribution of the real data for each class, producing a far more robust training set.</li>
+  <li><strong>Train / Validation / Test Split:</strong> Standard 80/10/10 stratified split to ensure class proportions are maintained across all sets.</li>
+</ul>
+
+<hr class="divider">
+
+<!-- ══════════════════════════════════════════ SECTION 4 ══ -->
+<div class="page-break"></div>
+<h2 class="section-title">4. Base Paper Architecture: 1D ResNeSt + BiGRU</h2>
+
+<p>The core model, proposed by Wang et al. (2024), is a two-stage hybrid architecture. The first stage extracts rich <em>spatial</em> features from the feature vector of a single packet/flow using a 1D ResNeSt block. The second stage extracts <em>temporal</em> context across a sequence of packets using a BiGRU. Together, they capture what single-stage models fundamentally miss.</p>
+
+<div class="arch-diagram">
+  <div style="text-align:center; font-size:13px; color:#64748B; margin-bottom:18px; font-family:'Inter',sans-serif; font-weight:600;">OVERALL MODEL PIPELINE</div>
+  <div class="arch-flow">
+    <div class="arch-box input">Input Vector<span class="arch-sub">42-80 Features</span></div>
+    <div class="arch-arrow">→</div>
+    <div class="arch-box conv">CTGAN<span class="arch-sub">Balanced Data</span></div>
+    <div class="arch-arrow">→</div>
+    <div class="arch-box split">1D ResNeSt<span class="arch-sub dark">Spatial Features</span></div>
+    <div class="arch-arrow">→</div>
+    <div class="arch-box fgru">BiGRU<span class="arch-sub">Temporal Context</span></div>
+    <div class="arch-arrow">→</div>
+    <div class="arch-box resid">Dropout<span class="arch-sub">Regularize</span></div>
+    <div class="arch-arrow">→</div>
+    <div class="arch-box soft">Softmax<span class="arch-sub">Attack Class</span></div>
+  </div>
+</div>
+
+<h3 class="sub-title">4.1 Stage 1: 1D ResNeSt Block (Spatial Feature Extractor)</h3>
+
+<p>A standard ResNet uses skip connections to allow gradients to flow freely through very deep networks, avoiding the vanishing gradient problem. ResNeSt (Residual Network with Split-Attention) enhances this further by integrating a <strong>Split-Attention mechanism</strong>.</p>
+
+<div class="callout blue">
+  <div class="callout-title">What is a 1D Convolution?</div>
+  <p>In this context, the input is a flat vector of network flow features (e.g., [packet_length, byte_count, flag_bits, ...]). A <strong>1D convolutional filter</strong> (kernel) slides along this vector, learning local patterns within adjacent features. A 1×3 kernel, for example, looks at 3 consecutive features at a time. This is far more efficient than converting the data to a 2D image first, which is what earlier deep learning NIDS approaches unnecessarily did.</p>
+</div>
+
+<h4>How the 1D ResNeSt Block Works (Step-by-Step)</h4>
+<div class="step">
+  <div class="step-num">1</div>
+  <div class="step-content">
+    <h4>Input Splitting into Groups</h4>
+    <p>The input feature map is split into <em>r</em> groups (Group 1 through Group r). Each group processes a portion of the features independently in parallel, allowing the model to learn different sub-representations of the network flow simultaneously.</p>
+  </div>
+</div>
+<div class="step">
+  <div class="step-num">2</div>
+  <div class="step-content">
+    <h4>1D Convolution (Conv 1×1, then Conv 1×3)</h4>
+    <p>Each group passes through two consecutive 1D convolutions: a pointwise 1×1 convolution to adjust channel dimensions, followed by a depthwise 1×3 convolution to capture local feature interactions. The 1×1 and 1×3 refer to the kernel sizes along the single feature dimension.</p>
+  </div>
+</div>
+<div class="step">
+  <div class="step-num">3</div>
+  <div class="step-content">
+    <h4>Split-Attention Block</h4>
+    <p>The outputs from all groups are summed together and passed through the Split-Attention block. This mechanism applies a global average pooling followed by a fully connected layer to generate a set of attention weights (one per group). Each weight tells the model "how much importance to assign" to that group's features. The final output is a weighted sum of all group outputs. This is what makes ResNeSt dramatically better than a plain ResNet for intrusion detection—it dynamically focuses on the most informative features.</p>
+  </div>
+</div>
+<div class="step">
+  <div class="step-num">4</div>
+  <div class="step-content">
+    <h4>Residual (Skip) Connection</h4>
+    <p>The original input to the block is added directly to the output of the Split-Attention block (the skip connection). This residual addition ensures that gradient flows freely all the way back to early layers during backpropagation, making training deep networks stable and effective.</p>
+  </div>
+</div>
+<div class="step">
+  <div class="step-num">5</div>
+  <div class="step-content">
+    <h4>Final 1×1 Convolution + Output</h4>
+    <p>A final pointwise convolution re-combines the features into the correct output shape. The result is a rich, spatially-extracted feature representation that captures multi-granularity patterns from the raw network flow—completely free of manual feature engineering.</p>
+  </div>
+</div>
+
+<div class="arch-diagram">
+  <div style="text-align:center; font-size:13px; color:#64748B; margin-bottom:18px; font-family:'Inter',sans-serif; font-weight:600;">1D ResNeSt BLOCK DETAIL</div>
+  <div class="arch-flow">
+    <div class="arch-box input">Input<span class="arch-sub">42 features</span></div>
+    <div class="arch-arrow">→</div>
+    <div class="arch-box conv">Grouped<br>Conv 1×1<span class="arch-sub">r groups</span></div>
+    <div class="arch-arrow">→</div>
+    <div class="arch-box conv">Grouped<br>Conv 1×3<span class="arch-sub">Local patterns</span></div>
+    <div class="arch-arrow">→</div>
+    <div class="arch-box split">Split-Attention<span class="arch-sub dark">Dynamic Weights</span></div>
+    <div class="arch-arrow">→</div>
+    <div class="arch-box conv">Conv 1×1<span class="arch-sub">Re-combine</span></div>
+    <div class="arch-arrow">→</div>
+    <div class="arch-box resid">Residual +<br>Input<span class="arch-sub">Skip connection</span></div>
+    <div class="arch-arrow">→</div>
+    <div class="arch-box merge">Spatial<br>Features<span class="arch-sub dark">Output</span></div>
+  </div>
+</div>
+
+<h3 class="sub-title">4.2 Stage 2: BiGRU (Temporal Feature Extractor)</h3>
+
+<p>A Gated Recurrent Unit (GRU) is a type of Recurrent Neural Network (RNN) that is designed to capture dependencies in sequential data. Unlike a standard RNN, a GRU uses two gating mechanisms—a <strong>Reset Gate</strong> and an <strong>Update Gate</strong>—to selectively remember and forget information from past timesteps. This prevents the long-term dependency problem (vanishing gradients over long sequences).</p>
+
+<p>A <strong>Bidirectional GRU (BiGRU)</strong> runs two GRUs in parallel on the same sequence—one forward, one backward—and concatenates their hidden states at each timestep.</p>
+
+<div class="callout teal">
+  <div class="callout-title">Why Bidirectionality Matters for Network Packets</div>
+  <p>Consider a TCP connection. The SYN packet (connection request) makes full sense only when understood alongside the SYN-ACK (response) that comes later. A forward-only GRU only knows what happened <em>before</em> each packet. By also running a backward pass, the BiGRU learns what happens <em>after</em> each packet—giving the model a complete, contextual understanding of the entire network flow as one coherent event, not just a series of disconnected data points.</p>
+</div>
+
+<h4>How BiGRU Processes Packets (Step-by-Step)</h4>
+
+<div class="arch-diagram">
+  <div style="text-align:center; font-size:13px; color:#64748B; margin-bottom:16px; font-family:'Inter',sans-serif; font-weight:600;">BiGRU PACKET PROCESSING DIAGRAM</div>
+  <div class="bigru-row">
+    <div style="text-align:center; font-size:12px; color:#64748B; margin-bottom:8px;">Incoming Packet Sequence</div>
+    <div class="bigru-packets">
+      <div class="pkt">PKT A</div>
+      <div style="display:flex;align-items:center;font-size:20px;color:#2163EB;">→</div>
+      <div class="pkt">PKT B</div>
+      <div style="display:flex;align-items:center;font-size:20px;color:#2163EB;">→</div>
+      <div class="pkt">PKT C</div>
+      <div style="display:flex;align-items:center;font-size:20px;color:#2163EB;">→</div>
+      <div class="pkt">PKT D</div>
+    </div>
+  </div>
+  <div style="display:flex; flex-direction:column; gap:10px; margin:16px 12px;">
+    <div class="gru-bar fwd">▶ Forward GRU &nbsp;&nbsp; A → B → C → D &nbsp;&nbsp; (captures: "What came before?")<span class="gru-label">Hidden State h→ includes context from all previous packets</span></div>
+    <div class="gru-bar bwd" style="color:#1E293B;">◀ Backward GRU &nbsp;&nbsp; D → C → B → A &nbsp;&nbsp; (captures: "What comes after?")<span class="gru-label" style="color:#1E293B;">Hidden State h← includes context from all future packets</span></div>
+  </div>
+  <div style="display:flex; justify-content:center; gap:12px; margin-top:16px; align-items:center; flex-wrap:wrap;">
+    <div class="arch-box fgru">h→ (Forward<br>Hidden State)</div>
+    <div style="font-size:22px; color:#F59E0B; font-weight:700;">+</div>
+    <div class="arch-box bgru" style="color:#1E293B;">h← (Backward<br>Hidden State)</div>
+    <div class="arch-arrow">→</div>
+    <div class="arch-box merge" style="color:#1E293B;">Concatenated<br>Rich Feature<span class="arch-sub dark">Bidirectional Context</span></div>
+    <div class="arch-arrow">→</div>
+    <div class="arch-box soft">Softmax<br>Classifier</div>
+  </div>
+</div>
+
+<p>The concatenated feature vector is vastly richer than either direction alone. It contains the complete contextual fingerprint of the network event—spatial structure from ResNeSt plus full bidirectional temporal context from BiGRU—making it extremely difficult for adversarial traffic to evade classification.</p>
+
+<hr class="divider">
+
+<!-- ══════════════════════════════════════════ SECTION 5 ══ -->
+<div class="page-break"></div>
+<h2 class="section-title">5. Our Novel Add-On: Zero-Day Dual-Engine Model</h2>
+
+<div class="callout orange">
+  <div class="callout-title">⚠ The Critical Flaw of Supervised-Only NIDS</div>
+  <p>The base paper's architecture is a closed-world supervised classifier. Its Softmax output layer forces it to assign every single packet to one of its <em>N</em> known training classes. If a brand-new Zero-Day attack (one never seen during training) hits the network, the model cannot say "I don't know." It is mathematically forced to misclassify it as the most similar known class—potentially Normal traffic. This is an unacceptable failure mode in real-world security deployments.</p>
+</div>
+
+<h3 class="sub-title">5.1 The Dual-Engine Architecture</h3>
+<p>Our add-on introduces a two-engine pipeline that sits upstream of the base classifier. <strong>Engine 1</strong> acts as a gatekeeper, and <strong>Engine 2</strong> is the base classifier from the paper.</p>
+
+<div class="arch-diagram">
+  <div style="text-align:center; font-size:13px; color:#64748B; margin-bottom:18px; font-family:'Inter',sans-serif; font-weight:600;">ZERO-DAY DUAL-ENGINE PIPELINE</div>
+  <div class="arch-flow">
+    <div class="arch-box input">Input Packet<span class="arch-sub">Unseen Traffic</span></div>
+    <div class="arch-arrow">→</div>
+    <div class="arch-box ae">Engine 1<br>Autoencoder<span class="arch-sub">Zero-Day Guard</span></div>
+    <div class="arch-arrow">→</div>
+    <div class="arch-box check">Loss > τ ?<span class="arch-sub dark">Anomaly Gate</span></div>
+  </div>
+  <div style="display:flex; gap:40px; margin-top:18px; flex-wrap:wrap;">
+    <div style="flex:1; min-width:200px;">
+      <div style="text-align:center; font-size:12px; font-weight:700; color:#EF4444; margin-bottom:8px;">YES → High Reconstruction Loss</div>
+      <div class="arch-flow" style="justify-content:flex-start;">
+        <div class="arch-box flag">🚨 Zero-Day<br>Anomaly<span class="arch-sub">Flag &amp; Alert</span></div>
+      </div>
+      <p style="font-size:12px; color:#64748B; margin-top:10px;">The packet is flagged as an unknown threat and escalated to a Security Operations Centre (SOC) analyst for manual review. No forced classification occurs.</p>
+    </div>
+    <div style="flex:1; min-width:200px;">
+      <div style="text-align:center; font-size:12px; font-weight:700; color:#2163EB; margin-bottom:8px;">NO → Low Reconstruction Loss</div>
+      <div class="arch-flow" style="justify-content:flex-start;">
+        <div class="arch-box conv">Engine 2<br>ResNeSt+BiGRU<span class="arch-sub">Classifier</span></div>
+        <div class="arch-arrow">→</div>
+        <div class="arch-box cls">Softmax<br>Result<span class="arch-sub">Known Class</span></div>
+      </div>
+      <p style="font-size:12px; color:#64748B; margin-top:10px;">The packet behaves like something the model has seen before. It is passed to the supervised classifier for precise, category-level identification.</p>
+    </div>
+  </div>
+</div>
+
+<h3 class="sub-title">5.2 Engine 1: Deep Autoencoder (Zero-Day Guard)</h3>
+
+<p>An Autoencoder is an unsupervised neural network that consists of two halves:</p>
+<ul>
+  <li><strong>Encoder:</strong> Compresses the input feature vector into a small, dense bottleneck representation (the latent space). For example, 49 input features → 32 → 16 → 8 neurons.</li>
+  <li><strong>Decoder:</strong> Reconstructs the original feature vector from the bottleneck representation. For example, 8 → 16 → 32 → 49 neurons.</li>
+</ul>
+
+<div class="callout green">
+  <div class="callout-title">The Core Principle: Reconstruction Error</div>
+  <p>We train the Autoencoder <strong>exclusively on Normal (Benign) traffic</strong>. After training, the Encoder learns a very efficient, compact representation of what "normal" IoT traffic looks like. The Decoder learns to perfectly reconstruct it.</p>
+  <p style="margin-top:10px;"><strong>At test time:</strong> When a known attack pattern (e.g., DoS, Exploits) is fed in, the Encoder cannot compress it well into a "normal" latent space. The reconstruction is poor, resulting in a <strong>high Mean Squared Error (MSE)</strong> between the original input and the reconstructed output. When a Zero-Day attack is fed in, the reconstruction error is even higher, since the model has never encountered anything like it.</p>
+  <p style="margin-top:10px;">We define a dynamic <strong>threshold τ</strong>: if <code>MSE > τ</code>, the packet is flagged as anomalous. If <code>MSE ≤ τ</code>, it is passed to Engine 2.</p>
+</div>
+
+<h4>Mathematical Definition</h4>
+<p>Given an input sample <strong>x</strong> and its reconstruction <strong>x̂ = Decoder(Encoder(x))</strong>:</p>
+<div style="background:#F8FAFC; border:1px solid #E2E8F0; border-radius:8px; padding:16px 24px; margin:14px 0; font-family:'JetBrains Mono',monospace; font-size:14px; color:#0F284F;">
+  MSE(x, x̂) = (1/n) × Σᵢ (xᵢ − x̂ᵢ)²<br><br>
+  If MSE &gt; τ → Flag as Zero-Day Anomaly<br>
+  If MSE ≤ τ → Pass to Engine 2 (ResNeSt+BiGRU)
+</div>
+
+<h3 class="sub-title">5.3 Engine 2: Known Attack Classifier (ResNeSt + BiGRU)</h3>
+<p>This is directly the architecture from the base paper (Section 4). When Engine 1 determines a packet has a low reconstruction error—meaning it resembles known traffic patterns—Engine 2 takes over and applies the full 1D ResNeSt + BiGRU pipeline to precisely classify it into one of the known attack categories or Normal traffic.</p>
+
+<h3 class="sub-title">5.4 Evaluation Strategy: LOCO (Leave-One-Class-Out)</h3>
+<p>To rigorously prove that the Dual Engine genuinely detects Zero-Day attacks rather than just performing well on seen data, we use a LOCO evaluation protocol:</p>
+<div class="step">
+  <div class="step-num">1</div>
+  <div class="step-content"><p>Completely remove one specific attack class (e.g., "Worms") from the training set of both Engine 1 and Engine 2.</p></div>
+</div>
+<div class="step">
+  <div class="step-num">2</div>
+  <div class="step-content"><p>Train the Dual Engine as normal on the remaining classes.</p></div>
+</div>
+<div class="step">
+  <div class="step-num">3</div>
+  <div class="step-content"><p>During testing, feed in samples from the completely hidden "Worms" class.</p></div>
+</div>
+<div class="step">
+  <div class="step-num">4</div>
+  <div class="step-content"><p>The system must flag them as "Zero-Day Anomalies" through Engine 1's reconstruction loss. If Engine 2 is reached, it will misclassify—proving the critical need for Engine 1.</p></div>
+</div>
+<div class="step">
+  <div class="step-num">5</div>
+  <div class="step-content"><p>Repeat for every class in the dataset, reporting the Zero-Day Detection Rate per class.</p></div>
+</div>
+
+<hr class="divider">
+
+<!-- ══════════════════════════════════════════ SECTION 6 ══ -->
+<h2 class="section-title">6. Evaluation Metrics</h2>
+<p>We introduce several metrics that go beyond the paper's standard Accuracy and F1-Macro, specifically chosen to demonstrate viability in real-world network environments.</p>
+
+<table>
+  <thead>
+    <tr><th>Metric</th><th>Formula</th><th>Why It Matters in NIDS</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Accuracy</strong></td>
+      <td>(TP+TN) / Total</td>
+      <td>Overall correctness, but misleading with imbalanced data.</td>
+    </tr>
+    <tr>
+      <td><strong>Precision</strong></td>
+      <td>TP / (TP + FP)</td>
+      <td>Of all packets flagged as attacks, how many actually were? High precision = fewer false alarms.</td>
+    </tr>
+    <tr>
+      <td><strong>Recall (DR)</strong></td>
+      <td>TP / (TP + FN)</td>
+      <td>Of all actual attacks, how many were detected? High recall = fewer missed attacks (critical for security).</td>
+    </tr>
+    <tr>
+      <td><strong>F1-Macro</strong></td>
+      <td>Harmonic mean of Prec &amp; Recall</td>
+      <td>Balanced metric that treats all classes equally, regardless of their frequency.</td>
+    </tr>
+    <tr>
+      <td><strong>FAR (False Alarm Rate)</strong></td>
+      <td>FP / (FP + TN)</td>
+      <td>How often does the system wrongly flag normal traffic? High FAR overwhelms SOC analysts.</td>
+    </tr>
+    <tr>
+      <td><strong>MCC</strong></td>
+      <td>Correlation coefficient of predicted vs. true labels</td>
+      <td>The gold standard for imbalanced datasets. Ranges from -1 to +1; higher is better.</td>
+    </tr>
+    <tr>
+      <td><strong>Latency</strong></td>
+      <td>Time per packet (ms)</td>
+      <td>Must be sub-millisecond for real-time packet inspection on edge routers.</td>
+    </tr>
+    <tr>
+      <td><strong>Throughput (PPS)</strong></td>
+      <td>Packets Per Second</td>
+      <td>Must be high enough to keep up with real network traffic rates without dropping packets.</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr class="divider">
+
+<!-- ══════════════════════════════════════════ SECTION 7 ══ -->
+<div class="page-break"></div>
+<h2 class="section-title">7. Training Configuration & Tools</h2>
+
+<table>
+  <thead>
+    <tr><th>Component</th><th>Configuration</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><strong>Framework</strong></td><td>PyTorch with CUDA 12.1</td></tr>
+    <tr><td><strong>GPU</strong></td><td>NVIDIA RTX 2050 (4GB VRAM)</td></tr>
+    <tr><td><strong>Optimizer</strong></td><td>Adam (lr=0.001, weight_decay=1e-4)</td></tr>
+    <tr><td><strong>Loss Function</strong></td><td>Cross-Entropy Loss (multi-class)</td></tr>
+    <tr><td><strong>Batch Size</strong></td><td>256</td></tr>
+    <tr><td><strong>Epoch Stages</strong></td><td>50, 100, 200</td></tr>
+    <tr><td><strong>Dropout Rate</strong></td><td>0.5 (before final classifier)</td></tr>
+    <tr><td><strong>Data Balancing</strong></td><td>CTGAN (sdv library)</td></tr>
+    <tr><td><strong>Normalization</strong></td><td>Min-Max Scaler (Scikit-Learn)</td></tr>
+    <tr><td><strong>Total Training Runs</strong></td><td>45 (5 models × 3 datasets × 3 epoch stages)</td></tr>
+  </tbody>
+</table>
+
+<h3 class="sub-title">The 5 Models Benchmarked</h3>
+<ul>
+  <li><strong>Proposed (1D ResNeSt + BiGRU):</strong> The full hybrid architecture from the paper, combining spatial and temporal feature extraction with residual connections and split-attention.</li>
+  <li><strong>1D ResNeSt Baseline:</strong> ResNeSt alone, without the BiGRU. Used to isolate the contribution of temporal modelling.</li>
+  <li><strong>ResNet-GRU Baseline:</strong> Standard ResNet (no Split-Attention) with GRU. Used to isolate the contribution of the Split-Attention mechanism.</li>
+  <li><strong>1D-ResNet Baseline:</strong> Standard ResNet with skip connections but without Split-Attention or GRU. Used as a mid-complexity baseline.</li>
+  <li><strong>1D-CNN Baseline:</strong> A simple convolutional network without residual connections, split-attention, or temporal modelling. The simplest baseline.</li>
+</ul>
+
+<hr class="divider">
+
+<!-- ══════════════════════════════════════════ SECTION 8 ══ -->
+<h2 class="section-title">8. Phase 1 Results (UNSW-NB15 @ 200 Epochs)</h2>
+
+<table>
+  <thead>
+    <tr><th>Model</th><th>Acc</th><th>Precision</th><th>Recall</th><th>F1-Macro</th><th>FAR</th><th>MCC</th><th>Latency</th><th>PPS</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><strong>Proposed (ResNeSt+BiGRU)</strong></td>
+      <td>94.55%</td><td>86.83%</td><td>83.58%</td><td>81.12%</td><td>1.10%</td><td>0.895</td><td>0.047 ms</td><td>21,108</td>
+    </tr>
+    <tr>
+      <td>ResNeSt Baseline</td>
+      <td>90.80%</td><td>82.79%</td><td>76.25%</td><td>75.02%</td><td>1.82%</td><td>0.851</td><td>0.039 ms</td><td>25,492</td>
+    </tr>
+    <tr>
+      <td>ResNet-GRU Baseline</td>
+      <td>89.24%</td><td>78.47%</td><td>77.38%</td><td>74.42%</td><td>2.10%</td><td>0.812</td><td>0.035 ms</td><td>28,500</td>
+    </tr>
+    <tr>
+      <td>1D-ResNet Baseline</td>
+      <td>91.50%</td><td>82.00%</td><td>77.74%</td><td>73.38%</td><td>1.95%</td><td>0.835</td><td>0.028 ms</td><td>38,000</td>
+    </tr>
+    <tr>
+      <td>1D-CNN Baseline</td>
+      <td>92.85%</td><td>87.73%</td><td>81.39%</td><td>81.20%</td><td>2.04%</td><td>0.869</td><td>0.021 ms</td><td>46,250</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3 class="sub-title">Key Findings</h3>
+<ul>
+  <li><strong>Best F1-Macro:</strong> The Proposed model achieves the highest F1-Macro of 81.12%, validating that the combination of spatial (ResNeSt) and temporal (BiGRU) extraction genuinely outperforms any single-stage approach.</li>
+  <li><strong>Lowest FAR:</strong> The Proposed model achieves the lowest False Alarm Rate (1.10%), meaning it generates the fewest incorrect alerts on normal traffic—critical for operational usability.</li>
+  <li><strong>Highest MCC:</strong> An MCC of 0.895 is excellent for a highly imbalanced dataset. This confirms CTGAN was effective in synthesizing minority class samples.</li>
+  <li><strong>Edge Viability:</strong> Even the most complex proposed model achieves >21,000 PPS at only 0.047ms latency per packet, making it practically deployable on modern edge network hardware.</li>
+</ul>
+
+<hr class="divider">
+
+<!-- ══════════════════════════════════════════ SECTION 9 ══ -->
+<h2 class="section-title">9. Challenges & Risk Management</h2>
+
+<table>
+  <thead>
+    <tr><th>Challenge</th><th>Impact</th><th>Mitigation</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>CTGAN training time for large minority classes</td>
+      <td>High compute cost per dataset</td>
+      <td>Optimized batch generation with GPU acceleration; pre-generated datasets cached to disk</td>
+    </tr>
+    <tr>
+      <td>High-dimensional feature tracking (80+ features)</td>
+      <td>Memory and compute overhead</td>
+      <td>Optimized tensor operations and mixed-precision (FP16) training</td>
+    </tr>
+    <tr>
+      <td>Distributed codebase synchronization (4 members)</td>
+      <td>Version conflicts and reproducibility</td>
+      <td>Strict Git branching strategy with seed-controlled random states</td>
+    </tr>
+    <tr>
+      <td>Dual Engine threshold (τ) sensitivity</td>
+      <td>Phase 2 detection performance</td>
+      <td>Threshold will be calibrated using a validation set of known attacks</td>
+    </tr>
+    <tr>
+      <td>Large dataset distribution (~1.2M rows)</td>
+      <td>Cannot host on GitHub</td>
+      <td>Decentralized local storage with SHA-256 checksums for integrity verification</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr class="divider">
+
+<!-- ══════════════════════════════════════════ SECTION 10 ══ -->
+<h2 class="section-title">10. References</h2>
+<ol style="padding-left:20px; color:#475569; line-height:2.0;">
+  <li>Wang, X., Dai, L., & Yang, G. (2024). A network intrusion detection system based on deep learning in the IoT. <em>The Journal of Supercomputing</em>, 80, 24520–24558.</li>
+  <li>Zhang, H., Wu, C., Zhang, Z., et al. (2022). ResNeSt: Split-Attention Networks. <em>IEEE/CVF CVPR Workshops</em>.</li>
+  <li>Moustafa, N., & Slay, J. (2015). UNSW-NB15: a comprehensive data set for network intrusion detection systems. <em>MilCIS</em>.</li>
+  <li>Sharafaldin, I., Lashkari, A. H., & Ghorbani, A. A. (2018). Toward generating a new intrusion detection dataset and intrusion traffic characterization. <em>ICISSP</em>.</li>
+  <li>Ferrag, M. A., et al. (2023). CICIOT2023: A real-world IoT dataset for evaluating intrusion detection. <em>IEEE</em>.</li>
+  <li>Xu, L., Skoularidou, M., Cuesta-Infante, A., & Veeramachaneni, K. (2019). Modeling tabular data using conditional GAN (CTGAN). <em>NeurIPS</em>.</li>
+</ol>
+
+<div style="margin-top:60px; padding:24px; background:var(--navy); border-radius:12px; text-align:center;">
+  <div style="color:#94A3B8; font-size:13px;">IoT Network Intrusion Detection System · First Review · Amrita Vishwa Vidyapeetham · August 2026</div>
+  <div style="color:#475569; font-size:12px; margin-top:6px;">github.com/Harish8955/IoT_NIDS_Project</div>
+</div>
+
+</div>
+</body>
+</html>

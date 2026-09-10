@@ -67,6 +67,7 @@ def compute_metrics(y_true, y_pred):
 
     return {
         'accuracy': acc,
+        'test_accuracy': acc,
         'precision_macro': prec_macro,
         'recall_macro': rec_macro,
         'f1_macro': f1_macro,
@@ -106,10 +107,59 @@ def print_paper_comparison_table(dataset_name, model_name, epoch_key, experiment
     print(f"{'Macro F1-Score':<20} | {exp_f1:<22} | {p_f1:<22}")
     print("==========================================================================\n")
 
-def save_experiment_results(exp_name, metrics, y_true, y_pred, train_accs, train_losses, class_names):
+def compile_all_experiment_summaries():
+    """
+    Scans all experiment directories in 'results/' and generates/updates
+    the master CSV table ('results/experiment_summary.csv') ensuring all
+    train and test metrics are included for all runs.
+    """
+    results_dir = "results"
+    if not os.path.exists(results_dir):
+        print(f"No results directory found at '{results_dir}'.")
+        return None
+
+    folders = [f for f in os.listdir(results_dir) if os.path.isdir(os.path.join(results_dir, f))]
+    rows = []
+
+    for exp_name in sorted(folders):
+        metrics_path = os.path.join(results_dir, exp_name, "metrics.json")
+        if os.path.exists(metrics_path):
+            with open(metrics_path, 'r') as f:
+                metrics = json.load(f)
+            
+            test_acc = metrics.get('test_accuracy', metrics.get('accuracy', 0.0))
+            
+            row = {
+                'Experiment': exp_name,
+                'Train Accuracy': round(metrics.get('train_accuracy', 0.0) * 100, 2),
+                'Test Accuracy': round(test_acc * 100, 2),
+                'Precision (Macro)': round(metrics.get('precision_macro', 0.0) * 100, 2),
+                'Recall (Macro)': round(metrics.get('recall_macro', 0.0) * 100, 2),
+                'F1-Score (Macro)': round(metrics.get('f1_macro', 0.0) * 100, 2),
+                'False Alarm Rate (%)': round(metrics.get('false_alarm_rate', 0.0) * 100, 2),
+                'Detection Rate (%)': round(metrics.get('detection_rate', 0.0) * 100, 2),
+                'MCC': round(metrics.get('mcc', 0.0), 4),
+                'Inference Latency (ms)': round(metrics.get('inference_latency_ms', 0.0), 4),
+                'Throughput (Packets/Sec)': round(metrics.get('throughput_pps', 0.0), 2),
+                'Precision (Weighted)': round(metrics.get('precision_weighted', 0.0) * 100, 2),
+                'Recall (Weighted)': round(metrics.get('recall_weighted', 0.0) * 100, 2),
+                'F1-Score (Weighted)': round(metrics.get('f1_weighted', 0.0) * 100, 2)
+            }
+            rows.append(row)
+
+    if rows:
+        summary_df = pd.DataFrame(rows)
+        summary_csv = os.path.join(results_dir, "experiment_summary.csv")
+        summary_df.to_csv(summary_csv, index=False)
+        print(f"Successfully compiled {len(rows)} experiment runs into master summary: {summary_csv}")
+        return summary_df
+    return None
+
+def save_experiment_results(exp_name, metrics, y_true, y_pred, train_accs, train_losses, class_names, test_accs=None, test_losses=None):
     """
     Automatically creates a dedicated folder for each experiment run and appends
     metrics to a master CSV table ('results/experiment_summary.csv').
+    Plots high-resolution learning curves comparing Train vs Test Accuracy & Loss per epoch.
     """
     exp_dir = os.path.join("results", exp_name)
     os.makedirs(exp_dir, exist_ok=True)
@@ -138,51 +188,52 @@ def save_experiment_results(exp_name, metrics, y_true, y_pred, train_accs, train
     plt.savefig(cm_norm_path, dpi=300)
     plt.close()
 
-    # 2. Save Training Curves
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5))
+    # 2. Save Training & Testing Curves (Train vs Test Accuracy & Loss)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
     epochs = range(1, len(train_accs) + 1)
-    ax1.plot(epochs, train_accs, 'b-', label='Accuracy')
-    ax1.set_title(f"Accuracy — {exp_name}")
-    ax1.grid(True)
-    ax2.plot(epochs, train_losses, 'r-', label='Loss')
-    ax2.set_title(f"Loss — {exp_name}")
-    ax2.grid(True)
+    
+    # Accuracy Curve Subplot
+    ax1.plot(epochs, [a * 100 if a <= 1.0 else a for a in train_accs], 'b-o', markersize=3, label='Train Accuracy')
+    if test_accs and len(test_accs) == len(train_accs):
+        ax1.plot(epochs, [a * 100 if a <= 1.0 else a for a in test_accs], 'g--s', markersize=3, label='Test Accuracy')
+    ax1.set_title(f"Accuracy Curve — {exp_name}", fontsize=11, fontweight='bold')
+    ax1.set_xlabel("Epoch")
+    ax1.set_ylabel("Accuracy (%)")
+    ax1.legend(loc='best')
+    ax1.grid(True, linestyle='--', alpha=0.6)
+
+    # Loss Curve Subplot
+    ax2.plot(epochs, train_losses, 'r-o', markersize=3, label='Train Loss')
+    if test_losses and len(test_losses) == len(train_losses):
+        ax2.plot(epochs, test_losses, color='orange', linestyle='--', marker='s', markersize=3, label='Test Loss')
+    ax2.set_title(f"Loss Curve — {exp_name}", fontsize=11, fontweight='bold')
+    ax2.set_xlabel("Epoch")
+    ax2.set_ylabel("Loss")
+    ax2.legend(loc='best')
+    ax2.grid(True, linestyle='--', alpha=0.6)
+
     plt.tight_layout()
     curves_path = os.path.join(exp_dir, "training_curves.png")
     plt.savefig(curves_path, dpi=300)
     plt.close()
+
+    # Ensure test_accuracy key is present in metrics dictionary
+    if 'test_accuracy' not in metrics:
+        metrics['test_accuracy'] = metrics.get('accuracy', 0.0)
+
+    if test_accs:
+        metrics['epoch_test_accuracies'] = test_accs
+    if test_losses:
+        metrics['epoch_test_losses'] = test_losses
+    metrics['epoch_train_accuracies'] = train_accs
+    metrics['epoch_train_losses'] = train_losses
 
     # 3. Save JSON metrics
     metrics_path = os.path.join(exp_dir, "metrics.json")
     with open(metrics_path, 'w') as f:
         json.dump(metrics, f, indent=4)
 
-    # 4. Append to Master Summary CSV
-    row_data = {
-        'Experiment': exp_name,
-        'Train Accuracy': round(metrics.get('train_accuracy', 0.0) * 100, 2),
-        'Test Accuracy': round(metrics['accuracy'] * 100, 2),
-        'Precision (Macro)': round(metrics['precision_macro'] * 100, 2),
-        'Recall (Macro)': round(metrics['recall_macro'] * 100, 2),
-        'F1-Score (Macro)': round(metrics['f1_macro'] * 100, 2),
-        'False Alarm Rate (%)': round(metrics.get('false_alarm_rate', 0.0) * 100, 2),
-        'Detection Rate (%)': round(metrics.get('detection_rate', 0.0) * 100, 2),
-        'MCC': round(metrics.get('mcc', 0.0), 4),
-        'Inference Latency (ms)': round(metrics.get('inference_latency_ms', 0.0), 4),
-        'Throughput (Packets/Sec)': round(metrics.get('throughput_pps', 0.0), 2),
-        'Precision (Weighted)': round(metrics['precision_weighted'] * 100, 2),
-        'Recall (Weighted)': round(metrics['recall_weighted'] * 100, 2),
-        'F1-Score (Weighted)': round(metrics['f1_weighted'] * 100, 2)
-    }
-    summary_csv = os.path.join("results", "experiment_summary.csv")
-    if os.path.exists(summary_csv):
-        summary_df = pd.read_csv(summary_csv)
-        # Overwrite row if experiment already ran, else append
-        summary_df = summary_df[summary_df['Experiment'] != exp_name]
-        summary_df = pd.concat([summary_df, pd.DataFrame([row_data])], ignore_index=True)
-    else:
-        summary_df = pd.DataFrame([row_data])
+    # 4. Re-compile Master Summary CSV
+    compile_all_experiment_summaries()
+    print(f"Results & Test Curves for '{exp_name}' successfully saved to: {exp_dir}")
 
-    summary_df.to_csv(summary_csv, index=False)
-    print(f"Results for '{exp_name}' successfully organized & saved to: {exp_dir}")
-    print(f"Master summary updated at: {summary_csv}")

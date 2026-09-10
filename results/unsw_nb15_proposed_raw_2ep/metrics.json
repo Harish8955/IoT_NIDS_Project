@@ -1,0 +1,32 @@
+{
+    "accuracy": 0.8158269679819528,
+    "test_accuracy": 0.8158269679819528,
+    "precision_macro": 0.622337348641606,
+    "recall_macro": 0.5204726301638469,
+    "f1_macro": 0.5188132245086775,
+    "detection_rate": 0.5204726301638469,
+    "false_alarm_rate": 0.030021190985886077,
+    "mcc": 0.7621215838099985,
+    "precision_weighted": 0.808932380523264,
+    "recall_weighted": 0.8158269679819528,
+    "f1_weighted": 0.7789922261821701,
+    "train_accuracy": 0.81089678577966,
+    "inference_latency_ms": 0.2112708207043357,
+    "throughput_pps": 4733.261302560359,
+    "epoch_test_accuracies": [
+        0.8069022836110341,
+        0.8158269679819528
+    ],
+    "epoch_test_losses": [
+        0.46189947012375043,
+        0.43723780352704983
+    ],
+    "epoch_train_accuracies": [
+        0.7843746444172897,
+        0.81089678577966
+    ],
+    "epoch_train_losses": [
+        0.5299021532289118,
+        0.4550928041490562
+    ]
+}

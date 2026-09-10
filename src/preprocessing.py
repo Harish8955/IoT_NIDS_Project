@@ -40,7 +40,7 @@ class TrafficDataPreprocessor:
             if hide_class in df[self.target_col].values:
                 zero_day_df = df[df[self.target_col] == hide_class].copy()
                 df = df[df[self.target_col] != hide_class].copy()
-                print(f"⚠️ LOCO ZERO-DAY SIMULATION: Hiding '{hide_class}' ({len(zero_day_df)} samples) from training split!")
+                print(f"[LOCO] ZERO-DAY SIMULATION: Hiding '{hide_class}' ({len(zero_day_df)} samples) from training split!")
 
         if self.target_col in df.columns:
             y = self.target_encoder.fit_transform(df[self.target_col])
@@ -99,8 +99,13 @@ class TrafficDataPreprocessor:
 
         if self.target_col in df.columns:
             valid_classes = set(self.target_encoder.classes_)
-            df = df[df[self.target_col].isin(valid_classes)]
-            y = self.target_encoder.transform(df[self.target_col])
+            # Safely extract target label y for known classes, else None for zero-day hidden classes
+            valid_mask = df[self.target_col].isin(valid_classes)
+            if valid_mask.any():
+                y = np.array([-1] * len(df))
+                y[valid_mask] = self.target_encoder.transform(df[self.target_col][valid_mask])
+            else:
+                y = None
             X_df = df.drop(columns=[self.target_col])
         else:
             y = None
