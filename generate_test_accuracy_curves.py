@@ -105,7 +105,9 @@ def generate_curves():
         ax.set_xlabel("Epoch", fontsize=10)
         ax.set_ylabel("Test Accuracy (%)", fontsize=10)
         ax.grid(True, linestyle='--', alpha=0.6)
-        ax.legend(fontsize=7, loc='lower right')
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(fontsize=7, loc='lower right')
 
     plt.tight_layout()
     summary_plot = os.path.join(plots_dir, "all_datasets_test_accuracy_curves.png")
@@ -115,3 +117,4 @@ def generate_curves():
 
 if __name__ == '__main__':
     generate_curves()
+
