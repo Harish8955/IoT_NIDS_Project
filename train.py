@@ -18,8 +18,10 @@ def train_and_evaluate(args):
 
     balance_suffix = "balanced" if args.balance else "raw"
     ds_prefix = args.dataset_name.lower().replace("-", "_")
-    exp_name = f"{ds_prefix}_{args.model}_{balance_suffix}_{args.epochs}ep"
+    hide_suffix = f"_loco_{args.hide_class.lower()}" if args.hide_class else ""
+    exp_name = f"{ds_prefix}_{args.model}{hide_suffix}_{balance_suffix}_{args.epochs}ep"
     print(f"\n==================================================")
+
     print(f"    RUNNING EXPERIMENT: {exp_name.upper()}")
     print(f"==================================================")
 
