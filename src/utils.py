@@ -155,14 +155,23 @@ def compile_all_experiment_summaries():
         return summary_df
     return None
 
-def save_experiment_results(exp_name, metrics, y_true, y_pred, train_accs, train_losses, class_names, test_accs=None, test_losses=None):
+def save_experiment_results(exp_name, metrics, y_true, y_pred, train_accs, train_losses, class_names, test_accs=None, test_losses=None, best_model_state=None, last_model_state=None):
     """
     Automatically creates a dedicated folder for each experiment run and appends
     metrics to a master CSV table ('results/experiment_summary.csv').
     Plots high-resolution learning curves comparing Train vs Test Accuracy & Loss per epoch.
+    Saves PyTorch model checkpoints ('best.pt' and 'last.pt').
     """
+    import torch
     exp_dir = os.path.join("results", exp_name)
     os.makedirs(exp_dir, exist_ok=True)
+
+    # Save best.pt and last.pt checkpoints if provided
+    if best_model_state is not None:
+        torch.save(best_model_state, os.path.join(exp_dir, "best.pt"))
+    if last_model_state is not None:
+        torch.save(last_model_state, os.path.join(exp_dir, "last.pt"))
+
 
     # 1. Save Confusion Matrix (Raw Counts & Normalized)
     cm = confusion_matrix(y_true, y_pred)

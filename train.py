@@ -76,8 +76,11 @@ def train_and_evaluate(args):
 
     # Step 6: Training Loop
     print(f"\n--- STAGE: Training Model for {args.epochs} Epochs ---")
+    import copy
     train_accs, train_losses = [], []
     test_accs, test_losses = [], []
+    best_test_acc = -1.0
+    best_model_state = None
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -127,8 +130,17 @@ def train_and_evaluate(args):
         test_losses.append(epoch_test_loss)
         test_accs.append(epoch_test_acc)
 
+        # Track best model state based on test accuracy
+        if epoch_test_acc > best_test_acc:
+            best_test_acc = epoch_test_acc
+            best_model_state = copy.deepcopy(model.state_dict())
+
         if epoch % max(1, args.epochs // 10) == 0 or epoch == args.epochs:
             print(f"Epoch [{epoch}/{args.epochs}] | Train Loss: {epoch_loss:.4f} | Train Acc: {epoch_acc * 100:.2f}% | Test Loss: {epoch_test_loss:.4f} | Test Acc: {epoch_test_acc * 100:.2f}%")
+
+    last_model_state = copy.deepcopy(model.state_dict())
+    if best_model_state is None:
+        best_model_state = last_model_state
 
     # Step 7: Evaluation on Test Set
     print("\n--- STAGE: Evaluation on Real Test Set ---")
@@ -209,8 +221,9 @@ def train_and_evaluate(args):
                 print(f"   Misclassified as Normal     : {misclassified_as_normal} / {total_zd} ({pct_misc:.2f}%)")
         print("======================================================================\n")
 
-    # Step 9: Save & Organize Results
-    save_experiment_results(exp_name, metrics, y_trues, y_preds, train_accs, train_losses, class_names, test_accs=test_accs, test_losses=test_losses)
+    # Step 9: Save & Organize Results (Includes best.pt and last.pt checkpoints)
+    save_experiment_results(exp_name, metrics, y_trues, y_preds, train_accs, train_losses, class_names, test_accs=test_accs, test_losses=test_losses, best_model_state=best_model_state, last_model_state=last_model_state)
+
 
     # Step 10: Print Side-by-Side Paper Comparison
     epoch_key = f"{args.epochs}epoch"
