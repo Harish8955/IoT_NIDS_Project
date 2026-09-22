@@ -24,3 +24,7 @@ desktop.ini
 .vscode/
 .idea/
 *.swp
+data/  
+*.csv  
+*.pt  
+results/ 
