@@ -3,51 +3,69 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 # =====================================================================
-# 1. PROPOSED MODEL COMPONENTS (1D ResNeSt + BiGRU)
+# 1. WANG ET AL. (2024) PROPOSED MODEL COMPONENTS
 # =====================================================================
 
 class SplitAttention1D(nn.Module):
-    """1D Split-Attention Block (ResNeSt 1D extension)."""
-    def __init__(self, channels, radis=2, reduction_factor=4):
+    """
+    Split-Attention Block as specified in Fig. 4:
+    Input -> GlobalAveragePooling -> Dense -> Dense -> r-Softmax -> r-Outputs
+    """
+    def __init__(self, channels, radix=2, reduction_factor=4):
         super(SplitAttention1D, self).__init__()
         self.channels = channels
-        self.radis = radis
+        self.radix = radix
         inter_channels = max(8, channels // reduction_factor)
         
         self.fc1 = nn.Linear(channels, inter_channels)
         self.relu = nn.ReLU(inplace=True)
-        self.fc2 = nn.Linear(inter_channels, channels * radis)
+        self.fc2 = nn.Linear(inter_channels, channels * radix)
         self.rsoftmax = nn.Softmax(dim=1)
 
     def forward(self, x):
         batch_size = x.size(0)
+        # Global Average Pooling (aggregating spatial information)
         gap = x.mean(dim=-1)
         
         att = self.fc1(gap)
         att = self.relu(att)
         att = self.fc2(att)
         
-        att = att.view(batch_size, self.radis, self.channels)
+        att = att.view(batch_size, self.radix, self.channels)
         att = self.rsoftmax(att)
         
-        weight = att[:, 0, :].unsqueeze(-1)
+        # Cross-channel soft attention weighting across radix paths
+        weight = att.sum(dim=1).unsqueeze(-1)
         return x * weight
 
 class ResNeStBlock1D(nn.Module):
-    """1D Residual Grouped Conv Unit with Split-Attention."""
-    def __init__(self, channels):
+    """
+    Grouped Convolutional Residual Unit as specified in Fig. 3:
+    Branch: Conv 1x1 -> Conv 1x3 (Grouped) -> Split-Attention -> Conv 1x1 + Residual
+    """
+    def __init__(self, in_channels, out_channels, radix=2, groups=2):
         super(ResNeStBlock1D, self).__init__()
-        self.conv1 = nn.Conv1d(channels, channels, kernel_size=1, bias=False)
-        self.bn1 = nn.BatchNorm1d(channels)
-        self.conv2 = nn.Conv1d(channels, channels, kernel_size=3, padding=1, groups=2, bias=False)
-        self.bn2 = nn.BatchNorm1d(channels)
-        self.split_attention = SplitAttention1D(channels)
-        self.conv3 = nn.Conv1d(channels, channels, kernel_size=1, bias=False)
-        self.bn3 = nn.BatchNorm1d(channels)
+        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=1, bias=False)
+        self.bn1 = nn.BatchNorm1d(out_channels)
+        
+        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1, groups=groups, bias=False)
+        self.bn2 = nn.BatchNorm1d(out_channels)
+        
+        self.split_attention = SplitAttention1D(out_channels, radix=radix)
+        
+        self.conv3 = nn.Conv1d(out_channels, out_channels, kernel_size=1, bias=False)
+        self.bn3 = nn.BatchNorm1d(out_channels)
+        
+        self.shortcut = nn.Sequential()
+        if in_channels != out_channels:
+            self.shortcut = nn.Sequential(
+                nn.Conv1d(in_channels, out_channels, kernel_size=1, bias=False),
+                nn.BatchNorm1d(out_channels)
+            )
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
-        residual = x
+        residual = self.shortcut(x)
         out = self.relu(self.bn1(self.conv1(x)))
         out = self.bn2(self.conv2(out))
         out = self.split_attention(out)
@@ -57,55 +75,69 @@ class ResNeStBlock1D(nn.Module):
 
 class IoT_NIDS_Net(nn.Module):
     """
-    Proposed Model in Paper: 1D ResNeSt + BiGRU
+    Proposed Model in Wang et al. (2024) [Fig. 1 & Fig. 2]:
+    1. Spatial Feature Extraction: 3 Conv1d (1x3) groups + BatchNorm + MaxPool
+    2. ResBlock: 1D ResNeSt Grouped Residual Unit with Split-Attention
+    3. Temporal Feature Extraction: BiGRU
+    4. Classification: Dropout -> Fully Connected Softmax
     """
     def __init__(self, input_features, num_classes, hidden_gru=64, dropout_rate=0.5):
         super(IoT_NIDS_Net, self).__init__()
-        self.conv_group1 = nn.Sequential(
-            nn.Conv1d(1, 32, kernel_size=3, padding=1),
+        
+        # Preliminary 1D Spatial Feature Extraction (Fig. 2 in paper)
+        self.spatial_extractor = nn.Sequential(
+            nn.Conv1d(1, 32, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm1d(32),
-            nn.ReLU(),
-            nn.MaxPool1d(2, ceil_mode=True)
-        )
-        self.conv_group2 = nn.Sequential(
-            nn.Conv1d(32, 64, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            
+            nn.Conv1d(32, 64, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm1d(64),
-            nn.ReLU(),
-            nn.MaxPool1d(2, ceil_mode=True)
-        )
-        self.conv_group3 = nn.Sequential(
-            nn.Conv1d(64, 128, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            
+            nn.Conv1d(64, 128, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm1d(128),
-            nn.ReLU()
+            nn.ReLU(inplace=True),
+            
+            nn.MaxPool1d(kernel_size=2, ceil_mode=True)
         )
-        self.resnest_unit = ResNeStBlock1D(128)
+        
+        # 1D ResNeSt Block (Fig. 3 in paper)
+        self.resblock = ResNeStBlock1D(in_channels=128, out_channels=128, radix=2, groups=2)
+        
+        # BiGRU Temporal Feature Extractor (Section 3.2.2 in paper)
         self.bigru = nn.GRU(
-            input_size=128, hidden_size=hidden_gru, num_layers=1,
-            batch_first=True, bidirectional=True
+            input_size=128,
+            hidden_size=hidden_gru,
+            num_layers=1,
+            batch_first=True,
+            bidirectional=True
         )
+        
         self.dropout = nn.Dropout(p=dropout_rate)
         self.fc = nn.Linear(hidden_gru * 2, num_classes)
 
     def forward(self, x):
         if x.dim() == 2:
-            x = x.unsqueeze(1)
-        x = self.conv_group1(x)
-        x = self.conv_group2(x)
-        x = self.conv_group3(x)
-        x = self.resnest_unit(x)
+            x = x.unsqueeze(1)  # (Batch, 1, Features)
+            
+        x = self.spatial_extractor(x)
+        x = self.resblock(x)
+        
+        # Transpose for BiGRU: (Batch, Channels, Time) -> (Batch, Time, Channels)
         x = x.transpose(1, 2)
         gru_out, _ = self.bigru(x)
+        
+        # Global temporal pooling across time dimension
         context_vector = torch.mean(gru_out, dim=1)
         out = self.dropout(context_vector)
         return self.fc(out)
 
 
 # =====================================================================
-# 2. BASELINE MODELS (Used in Paper Tables 12, 13, 14 for Comparison)
+# 2. BASELINE MODELS (TABLES 12, 13, 14 IN WANG ET AL.)
 # =====================================================================
 
 class CNN1D(nn.Module):
-    """Standard 1D-CNN Baseline Model"""
     def __init__(self, input_features, num_classes):
         super(CNN1D, self).__init__()
         self.features = nn.Sequential(
@@ -131,7 +163,6 @@ class CNN1D(nn.Module):
         return self.fc(x)
 
 class ResNet1D(nn.Module):
-    """Standard 1D-ResNet Baseline Model"""
     def __init__(self, input_features, num_classes):
         super(ResNet1D, self).__init__()
         self.conv1 = nn.Sequential(
@@ -159,7 +190,6 @@ class ResNet1D(nn.Module):
         return self.fc(out)
 
 class ResNetGRU1D(nn.Module):
-    """ResNet-BiGRU Baseline Model"""
     def __init__(self, input_features, num_classes):
         super(ResNetGRU1D, self).__init__()
         self.resnet = ResNet1D(input_features, num_classes=64)
@@ -169,7 +199,6 @@ class ResNetGRU1D(nn.Module):
     def forward(self, x):
         if x.dim() == 2:
             x = x.unsqueeze(1)
-        # Pass through Conv
         x = self.resnet.conv1(x)
         residual = x
         x = F.relu(self.resnet.res_block(x) + residual)
@@ -178,50 +207,44 @@ class ResNetGRU1D(nn.Module):
         out = torch.mean(gru_out, dim=1)
         return self.fc(out)
 
-def get_model(model_name, input_features, num_classes):
-    model_name = model_name.lower()
-    if model_name in ['proposed', '1d-resnest-bigru', 'resnest-bigru']:
-        return IoT_NIDS_Net(input_features, num_classes)
-    elif model_name in ['dual-engine', 'dual_engine', 'dual']:
-        return DualEngineIoT_NIDS(input_features, num_classes)
-    elif model_name == 'cnn':
-        return CNN1D(input_features, num_classes)
-    elif model_name == 'resnet':
-        return ResNet1D(input_features, num_classes)
-    elif model_name == 'resnest':
-        return IoT_NIDS_Net(input_features, num_classes)
-    elif model_name in ['resnet-gru', 'resnet-bigru']:
-        return ResNetGRU1D(input_features, num_classes)
-    else:
-        raise ValueError(f"Unknown model name '{model_name}'. Choose from: proposed, dual-engine, cnn, resnet, resnest, resnet-gru")
-
 
 # =====================================================================
-# 3. DUAL-ENGINE NOVEL EXTENSION (ENGINE 1 + ENGINE 2)
+# 3. NOVEL EXTENSION: CONFIDENCE-AWARE DUAL-ENGINE ZERO-DAY GUARD
 # =====================================================================
 
 class Engine1_ZeroDayAutoencoder(nn.Module):
     """
-    ENGINE 1: Unsupervised Deep Reconstruction Autoencoder (Zero-Day Guard).
+    ENGINE 1: Deep Reconstruction Autoencoder (Zero-Day Guard).
     Trained ONLY on Benign Normal traffic.
-    Computes Reconstruction Loss L_recon = || X - Decoded(X) ||^2.
-    If L_recon > tau (where tau = mean_benign + 3 * std_benign), flags as Zero-Day Threat!
+    Architecture: N -> 64 -> 32 -> 16 -> 8 -> 16 -> 32 -> 64 -> N
+    Reconstructs 0-255 scaled features linearly without Sigmoid clamp.
     """
-    def __init__(self, input_features, latent_dim=32):
+    def __init__(self, input_features, latent_dim=8):
         super(Engine1_ZeroDayAutoencoder, self).__init__()
         self.encoder = nn.Sequential(
             nn.Linear(input_features, 64),
             nn.BatchNorm1d(64),
             nn.ReLU(),
-            nn.Linear(64, latent_dim),
+            nn.Linear(64, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Linear(32, 16),
+            nn.BatchNorm1d(16),
+            nn.ReLU(),
+            nn.Linear(16, latent_dim),
             nn.ReLU()
         )
         self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, 64),
+            nn.Linear(latent_dim, 16),
+            nn.BatchNorm1d(16),
+            nn.ReLU(),
+            nn.Linear(16, 32),
+            nn.BatchNorm1d(32),
+            nn.ReLU(),
+            nn.Linear(32, 64),
             nn.BatchNorm1d(64),
             nn.ReLU(),
-            nn.Linear(64, input_features),
-            nn.Sigmoid()
+            nn.Linear(64, input_features)
         )
 
     def forward(self, x):
@@ -241,10 +264,9 @@ class Engine1_ZeroDayAutoencoder(nn.Module):
 
 class DualEngineIoT_NIDS(nn.Module):
     """
-    COMPLETE DUAL-ENGINE HYBRID ARCHITECTURE:
-    - Engine 1: Unsupervised Zero-Day Guard (Reconstruction Autoencoder)
-    - Engine 2: Supervised Known Attack Classifier (1D ResNeSt + BiGRU)
-    - Dual Gates: Reconstruction Threshold (tau = 0.0191) & Confidence Threshold (theta = 0.85)
+    CONFIDENCE-AWARE DUAL-ENGINE ARCHITECTURE:
+    - Engine 1: Unsupervised Deep Autoencoder Guard (tau = 0.0191)
+    - Engine 2: Supervised 1D ResNeSt + BiGRU Classifier (theta = 0.85)
     """
     def __init__(self, input_features, num_classes, tau_threshold=0.0191, theta_threshold=0.85):
         super(DualEngineIoT_NIDS, self).__init__()
@@ -254,44 +276,52 @@ class DualEngineIoT_NIDS(nn.Module):
         self.theta_threshold = theta_threshold
 
     def forward(self, x):
-        # Engine 1 Anomaly Check (Reconstruction Loss)
         recon_loss, latent = self.engine1_zero_day_guard.compute_anomaly_score(x)
-        
-        # Engine 2 Multi-Class Classifier & Softmax Confidence
         class_logits = self.engine2_classifier(x)
         probs = F.softmax(class_logits, dim=-1)
         p_max, _ = torch.max(probs, dim=-1)
         
-        # Dual Gate Decision Rule:
-        # Gate 1: L_recon > tau (Anomalous / Non-benign traffic)
-        # Gate 2: P_max < theta (Low prediction confidence / Novel attack variant)
+        # Dual-Engine Gating Protocol (Section 1 Decision Matrix):
+        # Triggered if Autoencoder flags anomaly OR Classifier is uncertain
         is_anomaly = recon_loss > self.tau_threshold
         is_low_confidence = p_max < self.theta_threshold
-        
-        # Zero-Day Threat is flagged when traffic is anomalous AND Engine 2 is uncertain
-        is_zero_day = is_anomaly & is_low_confidence
+        is_zero_day = is_anomaly | is_low_confidence
 
         return class_logits, is_zero_day, recon_loss, p_max
 
-    def predict_verdict(self, x):
+    def predict_verdict(self, x, normal_class_idx=0):
         """
-        Returns 3-way Security Verdict for each input sample:
-        - 0: BENIGN NORMAL TRAFFIC (L_recon <= tau)
-        - 1: KNOWN ATTACK CLASS (L_recon > tau AND P_max >= theta)
-        - 2: ZERO-DAY THREAT ALERT (L_recon > tau AND P_max < theta)
+        Returns 3-way Security Verdict:
+        - 0: BENIGN NORMAL TRAFFIC (L_recon <= tau AND P_max >= theta AND pred == normal)
+        - 1: KNOWN ATTACK CLASS    (L_recon <= tau AND P_max >= theta AND pred != normal)
+        - 2: ZERO-DAY THREAT ALERT (L_recon > tau OR P_max < theta)
         """
         class_logits, is_zero_day, recon_loss, p_max = self.forward(x)
         _, preds = torch.max(class_logits, dim=-1)
         
-        verdicts = torch.zeros(x.size(0), dtype=torch.long, device=x.device)
-        is_anomaly = recon_loss > self.tau_threshold
+        verdicts = torch.full((x.size(0),), 2, dtype=torch.long, device=x.device)
+        is_normal_recon = recon_loss <= self.tau_threshold
+        is_high_conf = p_max >= self.theta_threshold
         
-        # Known Attack: Anomaly + High Confidence
-        verdicts[is_anomaly & (p_max >= self.theta_threshold)] = 1
-        
-        # Zero-Day Threat: Anomaly + Low Confidence
-        verdicts[is_zero_day] = 2
+        # Benign Normal
+        verdicts[is_normal_recon & is_high_conf & (preds == normal_class_idx)] = 0
+        # Known Attack
+        verdicts[is_normal_recon & is_high_conf & (preds != normal_class_idx)] = 1
         
         return verdicts, preds, p_max, recon_loss
 
-
+def get_model(model_name, input_features, num_classes):
+    m = model_name.lower()
+    if m in ['proposed', '1d-resnest-bigru', 'resnest-bigru', 'resnest']:
+        return IoT_NIDS_Net(input_features, num_classes)
+    elif m in ['dual-engine', 'dual_engine', 'dual']:
+        return DualEngineIoT_NIDS(input_features, num_classes)
+    elif m == 'cnn':
+        return CNN1D(input_features, num_classes)
+    elif m == 'resnet':
+        return ResNet1D(input_features, num_classes)
+    elif m in ['resnet-gru', 'resnet-bigru']:
+        return ResNetGRU1D(input_features, num_classes)
+    else:
+        raise ValueError(f"Unknown model name '{model_name}'.")
+```[cite: 3, 7, 8, 9]
