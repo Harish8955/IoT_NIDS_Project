@@ -5,18 +5,21 @@ from imblearn.over_sampling import SMOTENC, ADASYN, RandomOverSampler
 
 class AdaptiveClassBalancer:
     """
-    Polymorphic Class Imbalance Balancer for Tabular NIDS Datasets.
+    Robust Class Imbalance Balancer for Tabular NIDS Datasets.
     
-    Balancing Hierarchy:
-    1. Mixed / Categorical data present -> SMOTENC (prevents fractional feature corruption)
-    2. Purely continuous data           -> ADASYN (focuses on boundary hardness)
-    3. Low sample count / degenerate kNN -> RandomOverSampler (robust fallback)
+    Dispatch Order:
+    1. If user forces 'random' or minimum class count < 2 -> RandomOverSampler.
+    2. If dataset contains categorical features:
+       - Uses SMOTENC with categorical indices identified to prevent numerical interpolation corruption.
+    3. If dataset is continuous:
+       - Uses ADASYN (focusing on minority density / decision boundary hardness).
+    4. Any runtime exception -> Graceful fallback to RandomOverSampler.
     """
     def __init__(self, target_col='attack_cat', max_minority_ratio=0.4, random_state=42, preferred_sampler='auto'):
         self.target_col = target_col
         self.max_minority_ratio = max_minority_ratio
         self.random_state = random_state
-        self.preferred_sampler = preferred_sampler.lower()  # 'auto', 'smotenc', 'adasyn', 'random'
+        self.preferred_sampler = str(preferred_sampler).lower()
 
     def _compute_sampling_caps(self, y):
         counts = Counter(y)
@@ -41,50 +44,53 @@ class AdaptiveClassBalancer:
 
         initial_counts, sampling_strategy = self._compute_sampling_caps(y)
         min_class_samples = min(initial_counts.values())
-        k_neighbors = min(5, max(1, min_class_samples - 1))
 
-        # Identify categorical column indices
         cat_indices = [
             i for i, col in enumerate(X.columns)
             if X[col].dtype == 'object' or str(X[col].dtype).startswith('category')
         ]
+        has_categorical = len(cat_indices) > 0
+        safe_k = min(5, max(1, min_class_samples - 1))
+        can_interpolate = min_class_samples > 1
 
         print(f"  [*] Initial Class Distribution: {dict(initial_counts)}")
-        print(f"  [*] Target Sampling Strategy (capped at {int(self.max_minority_ratio*100)}% of majority): {sampling_strategy}")
+        print(f"  [*] Target Strategy (capped at {int(self.max_minority_ratio * 100)}% of majority): {sampling_strategy}")
 
+        # Explicit Dispatch
         sampler = None
         sampler_name = ""
 
-        # Dispatch based on data modalities & configuration
-        if len(cat_indices) > 0 or self.preferred_sampler == 'smotenc':
-            sampler_name = "SMOTENC (Categorical-Aware)"
+        if self.preferred_sampler == 'random' or not can_interpolate:
+            sampler_name = "RandomOverSampler (Forced or Insufficient Neighbor Support)"
+            sampler = RandomOverSampler(sampling_strategy=sampling_strategy, random_state=self.random_state)
+
+        elif has_categorical:
+            if self.preferred_sampler == 'adasyn':
+                print("  [!] Warning: ADASYN requested but categorical columns detected. Switching to SMOTENC to avoid corruption.")
+            sampler_name = f"SMOTENC (Categorical-Aware, k={safe_k})"
             sampler = SMOTENC(
                 categorical_features=cat_indices,
                 sampling_strategy=sampling_strategy,
-                k_neighbors=k_neighbors,
-                random_state=self.random_state
-            )
-        elif self.preferred_sampler == 'adasyn' or len(cat_indices) == 0:
-            sampler_name = "ADASYN (Continuous Density)"
-            sampler = ADASYN(
-                sampling_strategy=sampling_strategy,
-                n_neighbors=k_neighbors,
-                random_state=self.random_state
-            )
-        else:
-            sampler_name = "RandomOverSampler"
-            sampler = RandomOverSampler(
-                sampling_strategy=sampling_strategy,
+                k_neighbors=safe_k,
                 random_state=self.random_state
             )
 
-        print(f"  [*] Selected Balancing Engine: {sampler_name}")
+        else:  # Purely continuous data
+            if self.preferred_sampler == 'smotenc':
+                print("  [!] Warning: SMOTENC requested on continuous data. Dispatching ADASYN.")
+            sampler_name = f"ADASYN (Continuous Density, n={safe_k})"
+            sampler = ADASYN(
+                sampling_strategy=sampling_strategy,
+                n_neighbors=safe_k,
+                random_state=self.random_state
+            )
+
+        print(f"  [*] Selected Balancer: {sampler_name}")
 
         try:
             X_res, y_res = sampler.fit_resample(X, y)
         except Exception as e:
-            print(f"  [!] Primary sampler ({sampler_name}) failed: {e}")
-            print("  [*] Falling back to safe RandomOverSampler.")
+            print(f"  [!] {sampler_name} failed ({e}). Falling back to RandomOverSampler.")
             fallback = RandomOverSampler(sampling_strategy=sampling_strategy, random_state=self.random_state)
             X_res, y_res = fallback.fit_resample(X, y)
 
@@ -93,6 +99,5 @@ class AdaptiveClassBalancer:
         print(f"  [*] Balanced Class Distribution: {dict(Counter(y_res))}")
         return resampled_df
 
-
-# Backward-compatible alias so existing imports in train.py don't break immediately
+# Alias for backwards compatibility
 ADASYNBalancer = AdaptiveClassBalancer

@@ -11,6 +11,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split, StratifiedKFold
@@ -23,7 +24,7 @@ for p in [BASE_DIR, SRC_DIR]:
         sys.path.insert(0, p)
 
 from preprocessing import prepare_official_split
-from adasyn_balancer import ADASYNBalancer
+from adasyn_balancer import AdaptiveClassBalancer
 from model import get_model
 from utils import compute_metrics, save_experiment_results, print_paper_comparison_table
 
@@ -38,6 +39,56 @@ def set_seed(seed=42):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+
+# =====================================================================
+# DYNAMIC THRESHOLD CALIBRATION (TAU & THETA FROM VALIDATION SET)
+# =====================================================================
+def calibrate_dual_engine_thresholds(model, val_loader, normal_idx, device, percentile_theta=5, k_sigma=3.0):
+    model.eval()
+    benign_recon_losses = []
+    correct_p_maxes = []
+
+    with torch.no_grad():
+        for X_val_b, y_val_b in val_loader:
+            X_val_b = X_val_b.to(device)
+            y_val_b = y_val_b.to(device)
+
+            # 1. Reconstruction error on benign validation samples
+            benign_mask = (y_val_b == normal_idx)
+            if benign_mask.sum() > 0:
+                recon_loss, _ = model.engine1_zero_day_guard.compute_anomaly_score(X_val_b[benign_mask])
+                benign_recon_losses.extend(recon_loss.cpu().numpy().tolist())
+
+            # 2. Maximum softmax confidence on correctly classified validation samples
+            logits = model.engine2_classifier(X_val_b)
+            probs = F.softmax(logits, dim=-1)
+            p_max, preds = torch.max(probs, dim=-1)
+            correct_mask = (preds == y_val_b)
+            if correct_mask.sum() > 0:
+                correct_p_maxes.extend(p_max[correct_mask].cpu().numpy().tolist())
+
+    # Dynamically tune Tau (Reconstruction threshold)
+    if len(benign_recon_losses) > 0:
+        mu_recon = float(np.mean(benign_recon_losses))
+        std_recon = float(np.std(benign_recon_losses))
+        calibrated_tau = float(mu_recon + k_sigma * std_recon)
+    else:
+        mu_recon, std_recon = 0.01, 0.003
+        calibrated_tau = 0.0191
+
+    # Dynamically tune Theta (Confidence floor)
+    if len(correct_p_maxes) > 0:
+        calibrated_theta = float(np.percentile(correct_p_maxes, percentile_theta))
+    else:
+        calibrated_theta = 0.85
+
+    model.tau_threshold = calibrated_tau
+    model.theta_threshold = calibrated_theta
+
+    print(f"\n  [+] Calibrated Engine 1 Tau Threshold   : {calibrated_tau:.6f} (mu={mu_recon:.6f}, std={std_recon:.6f})")
+    print(f"  [+] Calibrated Engine 2 Theta Threshold : {calibrated_theta:.4f} ({percentile_theta}th percentile)")
+    return calibrated_tau, calibrated_theta
 
 
 # =====================================================================
@@ -73,7 +124,7 @@ def pretrain_engine1(model, X_train, y_train, normal_idx, device, batch_size=64,
 
 
 # =====================================================================
-# 1. THREE-WAY SPLIT EXPERIMENT PIPELINE (TRAIN / VAL / TEST)
+# 1. THREE-WAY SPLIT PIPELINE (TRAIN / VAL / TEST)
 # =====================================================================
 def run_single_experiment(args, device):
     set_seed(args.seed)
@@ -88,29 +139,26 @@ def run_single_experiment(args, device):
 
     raw_df = pd.read_csv(args.dataset)
 
-    # TRUE ZERO-DAY LOCO SPLIT:
-    # If a class is hidden, isolate it strictly for zero-day testing
+    # Truly unseen LOCO isolation: hide target attack entirely from train and val
     zero_day_df = None
     if args.hide_class:
         zero_day_df = raw_df[raw_df[args.target_col].astype(str).str.lower() == args.hide_class.lower()].copy()
         raw_df = raw_df[raw_df[args.target_col].astype(str).str.lower() != args.hide_class.lower()].copy()
-        print(f"  [*] Zero-Day Class '{args.hide_class}' isolated: {len(zero_day_df)} samples reserved strictly for unseen testing.")
+        print(f"  [*] Zero-Day Class '{args.hide_class}' isolated: {len(zero_day_df)} samples reserved strictly for unseen evaluation.")
 
-    # 3-Way Split: Train 70%, Validation 15%, Test 15%
+    # 3-Way Stratified Partition: 70% Train, 15% Validation, 15% Unseen Test
     stratify_col = raw_df[args.target_col] if args.target_col in raw_df else None
     train_df, temp_df = train_test_split(raw_df, test_size=0.30, random_state=args.seed, stratify=stratify_col)
-    
     temp_stratify = temp_df[args.target_col] if args.target_col in temp_df else None
     val_df, test_df = train_test_split(temp_df, test_size=0.50, random_state=args.seed, stratify=temp_stratify)
 
-    # Apply Balancing Strictly to Train Set
+    # Balancing applied ONLY on Training Partition
     if args.balance:
-        print("\n--- STAGE: Minority Class Balancing (Training Set Only) ---")
-        balancer = ADASYNBalancer(target_col=args.target_col, random_state=args.seed)
+        print("\n--- STAGE: Minority Class Balancing (Training Partition Only) ---")
+        balancer = AdaptiveClassBalancer(target_col=args.target_col, random_state=args.seed)
         train_df = balancer.balance_dataset(train_df)
 
-    # Preprocessing: Fit exclusively on train_df, transform val_df and test_df
-    print("\n--- STAGE: Normalization & Preprocessing ---")
+    print("\n--- STAGE: Feature Preprocessing & Normalization ---")
     X_train, X_val, y_train, y_val, preprocessor, _ = prepare_official_split(
         train_df, val_df, target_col=args.target_col, hide_class=None
     )
@@ -120,7 +168,6 @@ def run_single_experiment(args, device):
     class_names = [str(c) for c in preprocessor.target_encoder.classes_]
     num_classes = len(class_names)
     
-    # Identify true index of Benign/Normal class
     normal_idx = 0
     for idx, c in enumerate(class_names):
         if c.lower() in ['normal', 'benign']:
@@ -175,12 +222,10 @@ def run_single_experiment(args, device):
             correct += (preds == y_batch).sum().item()
 
         scheduler.step()
-        epoch_loss = running_loss / total
-        epoch_acc = correct / total
-        train_losses.append(epoch_loss)
-        train_accs.append(epoch_acc)
+        train_losses.append(running_loss / total)
+        train_accs.append(correct / total)
 
-        # Validation per Epoch for Early / Best Selection
+        # Validation per Epoch
         model.eval()
         v_loss, v_correct, v_total = 0.0, 0, 0
         with torch.no_grad():
@@ -202,14 +247,18 @@ def run_single_experiment(args, device):
             best_model_state = copy.deepcopy(model.state_dict())
 
         if epoch % max(1, args.epochs // 10) == 0 or epoch == args.epochs:
-            print(f"Epoch [{epoch}/{args.epochs}] | Train Acc: {epoch_acc*100:.2f}% | Val Acc: {val_acc*100:.2f}%")
+            print(f"Epoch [{epoch}/{args.epochs}] | Train Acc: {train_accs[-1]*100:.2f}% | Val Acc: {val_acc*100:.2f}%")
 
     last_model_state = copy.deepcopy(model.state_dict())
 
-    # RESTORE BEST MODEL FOR FINAL TEST EVALUATION
+    # RESTORE BEST MODEL STATE FOR FINAL UNSEEN TESTING
     print("\n--- STAGE: Restoring Best Checkpoint for Final Unseen Test Evaluation ---")
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
+
+    # Dynamically calibrate Tau & Theta using validation data before final inference
+    if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
+        calibrate_dual_engine_thresholds(model, val_loader, normal_idx, device)
 
     model.eval()
     y_preds, y_trues = [], []
@@ -227,7 +276,7 @@ def run_single_experiment(args, device):
     latency_ms = (eval_time / num_samples) * 1000 if num_samples > 0 else 0.0
     throughput = num_samples / eval_time if eval_time > 0 else 0.0
 
-    metrics = compute_metrics(y_trues, y_preds, normal_idx=normal_idx)
+    metrics = compute_metrics(y_trues, y_preds, normal_idx=normal_idx, num_classes=num_classes)
     metrics['train_accuracy'] = train_accs[-1] if train_accs else 0.0
     metrics['best_val_accuracy'] = best_val_acc
     metrics['test_accuracy'] = metrics['accuracy']
@@ -242,7 +291,7 @@ def run_single_experiment(args, device):
     print(f"  [*] FALSE ALARM RATE (FAR) : {metrics['false_alarm_rate'] * 100:.2f}%")
     print("==================================================\n")
 
-    # Evaluate Truly Unseen Zero-Day Attack Set
+    # Evaluate Truly Unseen Zero-Day LOCO Class
     if zero_day_df is not None and len(zero_day_df) > 0:
         print(f"--- EVALUATING UNSEEN ZERO-DAY ATTACK: '{args.hide_class}' ({len(zero_day_df)} samples) ---")
         X_zd, _ = preprocessor.transform(zero_day_df)
@@ -253,8 +302,8 @@ def run_single_experiment(args, device):
                 detected = (verdicts == 2).sum().item()
                 pct = (detected / len(X_zd_tensor)) * 100
                 print(f"  Zero-Day Isolation Accuracy: {detected}/{len(X_zd_tensor)} ({pct:.2f}%)")
-                print(f"  Mean Recon Loss: {recon_loss.mean().item():.4f} (tau={model.tau_threshold})")
-                print(f"  Mean Softmax Confidence: {p_max.mean().item():.4f} (theta={model.theta_threshold})")
+                print(f"  Mean Recon Loss: {recon_loss.mean().item():.4f} (tau={model.tau_threshold:.6f})")
+                print(f"  Mean Softmax Confidence: {p_max.mean().item():.4f} (theta={model.theta_threshold:.4f})")
 
     # Save Preprocessor Artifacts alongside Checkpoints
     save_dir = os.path.join("results", exp_name)
@@ -302,7 +351,7 @@ def run_kfold_experiment(args, device):
 
         if args.balance:
             print("  [*] Applying Categorical-Aware Balancing on Training Fold...")
-            balancer = ADASYNBalancer(target_col=args.target_col, random_state=args.seed)
+            balancer = AdaptiveClassBalancer(target_col=args.target_col, random_state=args.seed)
             train_df = balancer.balance_dataset(train_df)
 
         X_train, X_val, y_train, y_val, preprocessor, _ = prepare_official_split(
@@ -399,7 +448,7 @@ def run_kfold_experiment(args, device):
                 y_preds.extend(p.cpu().numpy())
                 y_trues.extend(y_v.numpy())
 
-        metrics = compute_metrics(y_trues, y_preds, normal_idx=normal_idx)
+        metrics = compute_metrics(y_trues, y_preds, normal_idx=normal_idx, num_classes=num_classes)
         metrics['fold'] = fold
         metrics['best_val_accuracy'] = best_val_acc
         metrics['final_val_accuracy'] = metrics['accuracy']
