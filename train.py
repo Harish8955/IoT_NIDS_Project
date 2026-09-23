@@ -1,79 +1,142 @@
 import os
+import sys
 import argparse
 import copy
 import time
-import pandas as pd
+import json
+import random
+import pickle
 import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold
 
-try:
-    from preprocessing import prepare_official_split
-    from adasyn_balancer import ADASYNBalancer
-    from model import get_model
-    from utils import compute_metrics, save_experiment_results, print_paper_comparison_table
-except ModuleNotFoundError:
-    from src.preprocessing import prepare_official_split
-    from src.adasyn_balancer import ADASYNBalancer
-    from src.model import get_model
-    from src.utils import compute_metrics, save_experiment_results, print_paper_comparison_table
+# Ensure paths resolve cleanly
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SRC_DIR = os.path.join(BASE_DIR, "src")
+for p in [BASE_DIR, SRC_DIR]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+from preprocessing import prepare_official_split
+from adasyn_balancer import ADASYNBalancer
+from model import get_model
+from utils import compute_metrics, save_experiment_results, print_paper_comparison_table
 
 
-def train_and_evaluate(args):
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Compute Device: {device}")
+# =====================================================================
+# REPRODUCIBILITY CONTROLS
+# =====================================================================
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
-    balance_suffix = "adasyn_balanced" if args.balance else "raw"
+
+# =====================================================================
+# ENGINE 1 (AUTOENCODER) BENIGN PRE-TRAINING
+# =====================================================================
+def pretrain_engine1(model, X_train, y_train, normal_idx, device, batch_size=64, lr=0.001, epochs=5):
+    print("  [*] Pretraining Engine 1 Autoencoder on benign samples...")
+    criterion_recon = nn.MSELoss()
+    ae_optimizer = optim.Adam(model.engine1_zero_day_guard.parameters(), lr=lr)
+    
+    benign_mask = (y_train == normal_idx)
+    X_train_benign = X_train[benign_mask]
+    benign_loader = DataLoader(
+        TensorDataset(torch.tensor(X_train_benign, dtype=torch.float32)),
+        batch_size=batch_size, shuffle=True
+    )
+
+    for ae_ep in range(1, epochs + 1):
+        model.engine1_zero_day_guard.train()
+        running_loss = 0.0
+        for (x_b,) in benign_loader:
+            x_b = x_b.to(device)
+            ae_optimizer.zero_grad()
+            recon, _ = model.engine1_zero_day_guard(x_b)
+            loss_ae = criterion_recon(recon, x_b)
+            loss_ae.backward()
+            ae_optimizer.step()
+            running_loss += loss_ae.item() * x_b.size(0)
+        
+        if ae_ep % 2 == 0 or ae_ep == epochs:
+            avg_loss = running_loss / len(X_train_benign)
+            print(f"      AE Epoch [{ae_ep}/{epochs}] | Benign Recon MSE: {avg_loss:.6f}")
+
+
+# =====================================================================
+# 1. THREE-WAY SPLIT EXPERIMENT PIPELINE (TRAIN / VAL / TEST)
+# =====================================================================
+def run_single_experiment(args, device):
+    set_seed(args.seed)
+    balance_suffix = "balanced" if args.balance else "raw"
     ds_prefix = args.dataset_name.lower().replace("-", "_")
     hide_suffix = f"_loco_{args.hide_class.lower()}" if args.hide_class else ""
     exp_name = f"{ds_prefix}_{args.model}{hide_suffix}_{balance_suffix}_{args.epochs}ep"
-    print(f"\n==================================================")
+    
+    print("\n==================================================")
     print(f"    RUNNING EXPERIMENT: {exp_name.upper()}")
-    print(f"==================================================")
+    print("==================================================")
 
-    # 1. Load Data
-    if not os.path.exists(args.dataset):
-        raise FileNotFoundError(f"Dataset path '{args.dataset}' not found.")
-    
     raw_df = pd.read_csv(args.dataset)
+
+    # TRUE ZERO-DAY LOCO SPLIT:
+    # If a class is hidden, isolate it strictly for zero-day testing
+    zero_day_df = None
+    if args.hide_class:
+        zero_day_df = raw_df[raw_df[args.target_col].astype(str).str.lower() == args.hide_class.lower()].copy()
+        raw_df = raw_df[raw_df[args.target_col].astype(str).str.lower() != args.hide_class.lower()].copy()
+        print(f"  [*] Zero-Day Class '{args.hide_class}' isolated: {len(zero_day_df)} samples reserved strictly for unseen testing.")
+
+    # 3-Way Split: Train 70%, Validation 15%, Test 15%
+    stratify_col = raw_df[args.target_col] if args.target_col in raw_df else None
+    train_df, temp_df = train_test_split(raw_df, test_size=0.30, random_state=args.seed, stratify=stratify_col)
     
-    # 2. Strict Train/Test Separation (Prevent Balancing Data Leakage)[cite: 7, 8]
-    if args.test_dataset and os.path.exists(args.test_dataset):
-        train_raw_df = raw_df
-        test_raw_df = pd.read_csv(args.test_dataset)
-    else:
-        stratify_col = raw_df[args.target_col] if args.target_col in raw_df else None
-        train_raw_df, test_raw_df = train_test_split(
-            raw_df, test_size=args.test_size, random_state=42, stratify=stratify_col
-        )
+    temp_stratify = temp_df[args.target_col] if args.target_col in temp_df else None
+    val_df, test_df = train_test_split(temp_df, test_size=0.50, random_state=args.seed, stratify=temp_stratify)
 
-    # 3. ADASYN Oversampling on Training Set Only[cite: 7, 8]
+    # Apply Balancing Strictly to Train Set
     if args.balance:
-        print("\n--- STAGE: ADASYN Minority Class Balancing (Training Set Only) ---")
-        balancer = ADASYNBalancer(target_col=args.target_col)
-        train_raw_df = balancer.balance_dataset(train_raw_df)
+        print("\n--- STAGE: Minority Class Balancing (Training Set Only) ---")
+        balancer = ADASYNBalancer(target_col=args.target_col, random_state=args.seed)
+        train_df = balancer.balance_dataset(train_df)
 
-    # 4. Preprocessing & Min-Max Normalization[cite: 7, 8]
-    print("\n--- STAGE: Feature Preprocessing & Normalization ---")
-    X_train, X_test, y_train, y_test, preprocessor, zero_day_df = prepare_official_split(
-        train_raw_df, test_raw_df, target_col=args.target_col, hide_class=args.hide_class
+    # Preprocessing: Fit exclusively on train_df, transform val_df and test_df
+    print("\n--- STAGE: Normalization & Preprocessing ---")
+    X_train, X_val, y_train, y_val, preprocessor, _ = prepare_official_split(
+        train_df, val_df, target_col=args.target_col, hide_class=None
     )
+    X_test, y_test = preprocessor.transform(test_df)
 
     num_features = X_train.shape[1]
-    num_classes = len(preprocessor.target_encoder.classes_)
-    class_names = list(preprocessor.target_encoder.classes_)
-    normal_idx = class_names.index('Normal') if 'Normal' in class_names else 0
+    class_names = [str(c) for c in preprocessor.target_encoder.classes_]
+    num_classes = len(class_names)
+    
+    # Identify true index of Benign/Normal class
+    normal_idx = 0
+    for idx, c in enumerate(class_names):
+        if c.lower() in ['normal', 'benign']:
+            normal_idx = idx
+            break
 
-    print(f"Features: {num_features} | Classes: {class_names}")
-    print(f"Train samples: {X_train.shape[0]} | Test samples: {X_test.shape[0]}")
+    print(f"Features: {num_features} | Classes: {class_names} | Benign Index: {normal_idx}")
+    print(f"Splits -> Train: {len(X_train)} | Val: {len(X_val)} | Test: {len(X_test)}")
 
-    # 5. DataLoaders
     train_loader = DataLoader(
         TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.long)),
         batch_size=args.batch_size, shuffle=True
+    )
+    val_loader = DataLoader(
+        TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.long)),
+        batch_size=args.batch_size, shuffle=False
     )
     test_loader = DataLoader(
         TensorDataset(torch.tensor(X_test, dtype=torch.float32), torch.tensor(y_test, dtype=torch.long)),
@@ -81,170 +144,326 @@ def train_and_evaluate(args):
     )
 
     model = get_model(args.model, input_features=num_features, num_classes=num_classes).to(device)
-    criterion_cls = nn.CrossEntropyLoss()
-    criterion_recon = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
+    criterion_cls = nn.CrossEntropyLoss(label_smoothing=0.05)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
 
-    # 6. Unsupervised Benign Pretraining for Engine 1 (Dual-Engine Mode)[cite: 7, 8]
     if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
-        print("\n--- STAGE: Engine 1 Autoencoder Unsupervised Training (Benign Traffic Only) ---")
-        ae_optimizer = optim.Adam(model.engine1_zero_day_guard.parameters(), lr=args.lr)
-        benign_mask = (y_train == normal_idx)
-        X_train_benign = X_train[benign_mask]
-        
-        benign_loader = DataLoader(
-            TensorDataset(torch.tensor(X_train_benign, dtype=torch.float32)),
-            batch_size=args.batch_size, shuffle=True
-        )
-        
-        for ae_ep in range(1, 11):
-            model.engine1_zero_day_guard.train()
-            running_ae_loss = 0.0
-            for (x_b,) in benign_loader:
-                x_b = x_b.to(device)
-                ae_optimizer.zero_grad()
-                recon, _ = model.engine1_zero_day_guard(x_b)
-                loss_ae = criterion_recon(recon, x_b)
-                loss_ae.backward()
-                ae_optimizer.step()
-                running_ae_loss += loss_ae.item() * x_b.size(0)
-            avg_ae_loss = running_ae_loss / len(X_train_benign)
-            if ae_ep % 2 == 0 or ae_ep == 10:
-                print(f"AE Epoch [{ae_ep}/10] | Benign Reconstruction MSE: {avg_ae_loss:.6f}")
+        pretrain_engine1(model, X_train, y_train, normal_idx, device, batch_size=args.batch_size, lr=args.lr, epochs=10)
 
-    # 7. Supervised Training Loop
+    # Supervised Training Loop
     print(f"\n--- STAGE: Training Classifier for {args.epochs} Epochs ---")
     train_accs, train_losses = [], []
-    test_accs, test_losses = [], []
-    best_test_acc = -1.0
+    val_accs, val_losses = [], []
+    best_val_acc = -1.0
     best_model_state = None
 
     for epoch in range(1, args.epochs + 1):
         model.train()
         running_loss, correct, total = 0.0, 0, 0
-        
         for X_batch, y_batch in train_loader:
             X_batch, y_batch = X_batch.to(device), y_batch.to(device)
             optimizer.zero_grad()
-            
-            if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
-                logits = model.engine2_classifier(X_batch)
-            else:
-                logits = model(X_batch)
-                
+            logits = model.engine2_classifier(X_batch) if args.model.lower() in ['dual-engine', 'dual_engine', 'dual'] else model(X_batch)
             loss = criterion_cls(logits, y_batch)
             loss.backward()
             optimizer.step()
-            
+
             running_loss += loss.item() * X_batch.size(0)
             _, preds = torch.max(logits, 1)
             total += y_batch.size(0)
             correct += (preds == y_batch).sum().item()
-            
+
+        scheduler.step()
         epoch_loss = running_loss / total
         epoch_acc = correct / total
         train_losses.append(epoch_loss)
         train_accs.append(epoch_acc)
 
-        # Validation per Epoch
+        # Validation per Epoch for Early / Best Selection
         model.eval()
-        t_loss, t_correct, t_total = 0.0, 0, 0
+        v_loss, v_correct, v_total = 0.0, 0, 0
         with torch.no_grad():
-            for X_t, y_t in test_loader:
-                X_t, y_t = X_t.to(device), y_t.to(device)
-                if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
-                    t_logits = model.engine2_classifier(X_t)
-                else:
-                    t_logits = model(X_t)
-                loss = criterion_cls(t_logits, y_t)
-                t_loss += loss.item() * X_t.size(0)
-                _, p = torch.max(t_logits, 1)
-                t_total += y_t.size(0)
-                t_correct += (p == y_t).sum().item()
+            for X_v, y_v in val_loader:
+                X_v, y_v = X_v.to(device), y_v.to(device)
+                v_logits = model.engine2_classifier(X_v) if args.model.lower() in ['dual-engine', 'dual_engine', 'dual'] else model(X_v)
+                loss = criterion_cls(v_logits, y_v)
+                v_loss += loss.item() * X_v.size(0)
+                _, p = torch.max(v_logits, 1)
+                v_total += y_v.size(0)
+                v_correct += (p == y_v).sum().item()
 
-        test_acc = t_correct / t_total
-        test_losses.append(t_loss / t_total)
-        test_accs.append(test_acc)
+        val_acc = v_correct / v_total
+        val_losses.append(v_loss / v_total)
+        val_accs.append(val_acc)
 
-        if test_acc > best_test_acc:
-            best_test_acc = test_acc
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
             best_model_state = copy.deepcopy(model.state_dict())
 
         if epoch % max(1, args.epochs // 10) == 0 or epoch == args.epochs:
-            print(f"Epoch [{epoch}/{args.epochs}] | Train Loss: {epoch_loss:.4f} | Train Acc: {epoch_acc*100:.2f}% | Test Acc: {test_acc*100:.2f}%")
+            print(f"Epoch [{epoch}/{args.epochs}] | Train Acc: {epoch_acc*100:.2f}% | Val Acc: {val_acc*100:.2f}%")
 
     last_model_state = copy.deepcopy(model.state_dict())
 
-    # 8. Test Set Evaluation
+    # RESTORE BEST MODEL FOR FINAL TEST EVALUATION
+    print("\n--- STAGE: Restoring Best Checkpoint for Final Unseen Test Evaluation ---")
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+
     model.eval()
     y_preds, y_trues = [], []
     start_eval = time.time()
     with torch.no_grad():
-        for X_batch, y_batch in test_loader:
-            X_batch = X_batch.to(device)
-            if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
-                logits = model.engine2_classifier(X_batch)
-            else:
-                logits = model(X_batch)
+        for X_b, y_b in test_loader:
+            X_b = X_b.to(device)
+            logits = model.engine2_classifier(X_b) if args.model.lower() in ['dual-engine', 'dual_engine', 'dual'] else model(X_b)
             _, p = torch.max(logits, 1)
             y_preds.extend(p.cpu().numpy())
-            y_trues.extend(y_batch.numpy())
+            y_trues.extend(y_b.numpy())
 
     eval_time = time.time() - start_eval
     num_samples = len(y_trues)
     latency_ms = (eval_time / num_samples) * 1000 if num_samples > 0 else 0.0
     throughput = num_samples / eval_time if eval_time > 0 else 0.0
 
-    metrics = compute_metrics(y_trues, y_preds)
+    metrics = compute_metrics(y_trues, y_preds, normal_idx=normal_idx)
     metrics['train_accuracy'] = train_accs[-1] if train_accs else 0.0
+    metrics['best_val_accuracy'] = best_val_acc
     metrics['test_accuracy'] = metrics['accuracy']
     metrics['inference_latency_ms'] = latency_ms
     metrics['throughput_pps'] = throughput
 
-    print(f"\n==================================================")
+    print("\n==================================================")
+    print(f"  [+] BEST VAL ACCURACY      : {best_val_acc * 100:.2f}%")
     print(f"  [+] FINAL TEST ACCURACY    : {metrics['test_accuracy'] * 100:.2f}%")
     print(f"  [*] TEST MACRO F1-SCORE    : {metrics['f1_macro'] * 100:.2f}%")
-    print(f"  [*] FALSE ALARM RATE (FAR) : {metrics['false_alarm_rate'] * 100:.2f}%")
     print(f"  [*] DETECTION RATE (DR)   : {metrics['detection_rate'] * 100:.2f}%")
-    print(f"==================================================\n")
+    print(f"  [*] FALSE ALARM RATE (FAR) : {metrics['false_alarm_rate'] * 100:.2f}%")
+    print("==================================================\n")
 
-    # 9. Zero-Day LOCO Evaluation[cite: 7, 8]
+    # Evaluate Truly Unseen Zero-Day Attack Set
     if zero_day_df is not None and len(zero_day_df) > 0:
-        print(f"--- LOCO ZERO-DAY TEST: '{args.hide_class}' ({len(zero_day_df)} samples) ---")
+        print(f"--- EVALUATING UNSEEN ZERO-DAY ATTACK: '{args.hide_class}' ({len(zero_day_df)} samples) ---")
         X_zd, _ = preprocessor.transform(zero_day_df)
         X_zd_tensor = torch.tensor(X_zd, dtype=torch.float32).to(device)
-        
         with torch.no_grad():
             if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
                 verdicts, preds, p_max, recon_loss = model.predict_verdict(X_zd_tensor, normal_class_idx=normal_idx)
                 detected = (verdicts == 2).sum().item()
                 pct = (detected / len(X_zd_tensor)) * 100
-                print(f"  Zero-Day Detection Rate: {detected}/{len(X_zd_tensor)} ({pct:.2f}%)")
+                print(f"  Zero-Day Isolation Accuracy: {detected}/{len(X_zd_tensor)} ({pct:.2f}%)")
                 print(f"  Mean Recon Loss: {recon_loss.mean().item():.4f} (tau={model.tau_threshold})")
-                print(f"  Mean P_max: {p_max.mean().item():.4f} (theta={model.theta_threshold})")
+                print(f"  Mean Softmax Confidence: {p_max.mean().item():.4f} (theta={model.theta_threshold})")
 
-    # 10. Save Results & Benchmark Compare
+    # Save Preprocessor Artifacts alongside Checkpoints
+    save_dir = os.path.join("results", exp_name)
+    os.makedirs(save_dir, exist_ok=True)
+    with open(os.path.join(save_dir, "preprocessor.pkl"), "wb") as f:
+        pickle.dump(preprocessor, f)
+
     save_experiment_results(
         exp_name, metrics, y_trues, y_preds, train_accs, train_losses,
-        class_names, test_accs=test_accs, test_losses=test_losses,
+        class_names, val_accs=val_accs, val_losses=val_losses,
         best_model_state=best_model_state, last_model_state=last_model_state
     )
 
     mapping = {'cnn': 'CNN', 'resnet': 'ResNet', 'resnest': 'ResNeSt', 'resnet-gru': 'ResNet-GRU', 'proposed': 'Proposed', 'dual-engine': 'Proposed'}
     print_paper_comparison_table(args.dataset_name, mapping.get(args.model.lower(), 'Proposed'), f"{args.epochs}epoch", metrics)
 
+
+# =====================================================================
+# 2. STRATIFIED K-FOLD PIPELINE (WITH BEST-MODEL RESTORATION)
+# =====================================================================
+def run_kfold_experiment(args, device):
+    set_seed(args.seed)
+    ds_prefix = args.dataset_name.lower().replace("-", "_")
+    exp_dir_name = f"{ds_prefix}_{args.model}_{args.kfold}fold_{args.epochs}ep"
+    results_dir = os.path.join("results", exp_dir_name)
+    os.makedirs(results_dir, exist_ok=True)
+
+    print("\n=======================================================")
+    print(f"   RUNNING {args.kfold}-FOLD CROSS VALIDATION: {exp_dir_name.upper()}")
+    print("=======================================================")
+
+    raw_df = pd.read_csv(args.dataset)
+    y_raw = raw_df[args.target_col].copy()
+
+    skf = StratifiedKFold(n_splits=args.kfold, shuffle=True, random_state=args.seed)
+    fold_metrics = []
+
+    for fold, (train_idx, val_idx) in enumerate(skf.split(raw_df, y_raw), 1):
+        print(f"\n>>>>>>>>>>>>>>>>>>>> FOLD [{fold}/{args.kfold}] <<<<<<<<<<<<<<<<<<<<")
+        fold_dir = os.path.join(results_dir, f"fold_{fold}")
+        os.makedirs(fold_dir, exist_ok=True)
+
+        train_df = raw_df.iloc[train_idx].copy()
+        val_df = raw_df.iloc[val_idx].copy()
+
+        if args.balance:
+            print("  [*] Applying Categorical-Aware Balancing on Training Fold...")
+            balancer = ADASYNBalancer(target_col=args.target_col, random_state=args.seed)
+            train_df = balancer.balance_dataset(train_df)
+
+        X_train, X_val, y_train, y_val, preprocessor, _ = prepare_official_split(
+            train_df, val_df, target_col=args.target_col, hide_class=args.hide_class
+        )
+
+        num_features = X_train.shape[1]
+        class_names = [str(c) for c in preprocessor.target_encoder.classes_]
+        num_classes = len(class_names)
+        
+        normal_idx = 0
+        for idx, c in enumerate(class_names):
+            if c.lower() in ['normal', 'benign']:
+                normal_idx = idx
+                break
+
+        train_loader = DataLoader(
+            TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.long)),
+            batch_size=args.batch_size, shuffle=True
+        )
+        val_loader = DataLoader(
+            TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.long)),
+            batch_size=args.batch_size, shuffle=False
+        )
+
+        model = get_model(args.model, input_features=num_features, num_classes=num_classes).to(device)
+        criterion_cls = nn.CrossEntropyLoss(label_smoothing=0.05)
+        optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
+
+        if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
+            pretrain_engine1(model, X_train, y_train, normal_idx, device, batch_size=args.batch_size, lr=args.lr, epochs=5)
+
+        train_accs, train_losses = [], []
+        val_accs, val_losses = [], []
+        best_val_acc = -1.0
+        best_model_state = None
+
+        for epoch in range(1, args.epochs + 1):
+            model.train()
+            running_loss, correct, total = 0.0, 0, 0
+            for X_b, y_b in train_loader:
+                X_b, y_b = X_b.to(device), y_b.to(device)
+                optimizer.zero_grad()
+                logits = model.engine2_classifier(X_b) if args.model.lower() in ['dual-engine', 'dual_engine', 'dual'] else model(X_b)
+                loss = criterion_cls(logits, y_b)
+                loss.backward()
+                optimizer.step()
+
+                running_loss += loss.item() * X_b.size(0)
+                _, preds = torch.max(logits, 1)
+                total += y_b.size(0)
+                correct += (preds == y_b).sum().item()
+
+            scheduler.step()
+            train_losses.append(running_loss / total)
+            train_accs.append(correct / total)
+
+            model.eval()
+            v_loss, v_correct, v_total = 0.0, 0, 0
+            with torch.no_grad():
+                for X_v, y_v in val_loader:
+                    X_v, y_v = X_v.to(device), y_v.to(device)
+                    v_logits = model.engine2_classifier(X_v) if args.model.lower() in ['dual-engine', 'dual_engine', 'dual'] else model(X_v)
+                    loss = criterion_cls(v_logits, y_v)
+                    v_loss += loss.item() * X_v.size(0)
+                    _, p = torch.max(v_logits, 1)
+                    v_total += y_v.size(0)
+                    v_correct += (p == y_v).sum().item()
+
+            current_val_acc = v_correct / v_total
+            val_losses.append(v_loss / v_total)
+            val_accs.append(current_val_acc)
+
+            if current_val_acc > best_val_acc:
+                best_val_acc = current_val_acc
+                best_model_state = copy.deepcopy(model.state_dict())
+
+            if epoch % max(1, args.epochs // 5) == 0 or epoch == args.epochs:
+                print(f"  Epoch [{epoch}/{args.epochs}] | Train Acc: {train_accs[-1]*100:.2f}% | Val Acc: {current_val_acc*100:.2f}%")
+
+        # RESTORE BEST MODEL STATE FOR FOLD EVALUATION
+        print(f"  [*] Restoring Fold {fold} best checkpoint for evaluation...")
+        if best_model_state is not None:
+            model.load_state_dict(best_model_state)
+
+        model.eval()
+        y_preds, y_trues = [], []
+        with torch.no_grad():
+            for X_v, y_v in val_loader:
+                X_v = X_v.to(device)
+                v_logits = model.engine2_classifier(X_v) if args.model.lower() in ['dual-engine', 'dual_engine', 'dual'] else model(X_v)
+                _, p = torch.max(v_logits, 1)
+                y_preds.extend(p.cpu().numpy())
+                y_trues.extend(y_v.numpy())
+
+        metrics = compute_metrics(y_trues, y_preds, normal_idx=normal_idx)
+        metrics['fold'] = fold
+        metrics['best_val_accuracy'] = best_val_acc
+        metrics['final_val_accuracy'] = metrics['accuracy']
+        fold_metrics.append(metrics)
+
+        torch.save(best_model_state, os.path.join(fold_dir, "best_model.pt"))
+        torch.save(model.state_dict(), os.path.join(fold_dir, "last_model.pt"))
+        with open(os.path.join(fold_dir, "preprocessor.pkl"), "wb") as f:
+            pickle.dump(preprocessor, f)
+
+        print(f"  Fold {fold} Evaluated Accuracy: {metrics['accuracy']*100:.2f}% | DR: {metrics['detection_rate']*100:.2f}% | FAR: {metrics['false_alarm_rate']*100:.2f}%")
+
+    accs = [m['accuracy'] * 100 for m in fold_metrics]
+    f1s = [m['f1_macro'] * 100 for m in fold_metrics]
+    drs = [m['detection_rate'] * 100 for m in fold_metrics]
+    fars = [m['false_alarm_rate'] * 100 for m in fold_metrics]
+
+    summary = {
+        "mean_accuracy": float(np.mean(accs)),
+        "std_accuracy": float(np.std(accs)),
+        "mean_f1_macro": float(np.mean(f1s)),
+        "std_f1_macro": float(np.std(f1s)),
+        "mean_detection_rate": float(np.mean(drs)),
+        "std_detection_rate": float(np.std(drs)),
+        "mean_false_alarm_rate": float(np.mean(fars)),
+        "std_false_alarm_rate": float(np.std(fars)),
+        "folds": fold_metrics
+    }
+
+    with open(os.path.join(results_dir, "kfold_summary.json"), "w") as f:
+        json.dump(summary, f, indent=4)
+
+    print("\n=======================================================")
+    print(f"        {args.kfold}-FOLD CROSS VALIDATION SUMMARY       ")
+    print("=======================================================")
+    print(f"  ACCURACY    : {summary['mean_accuracy']:.2f}% (+/- {summary['std_accuracy']:.2f}%)")
+    print(f"  MACRO F1    : {summary['mean_f1_macro']:.2f}% (+/- {summary['std_f1_macro']:.2f}%)")
+    print(f"  DETECTION RT: {summary['mean_detection_rate']:.2f}% (+/- {summary['std_detection_rate']:.2f}%)")
+    print(f"  FALSE ALARM : {summary['mean_false_alarm_rate']:.2f}% (+/- {summary['std_false_alarm_rate']:.2f}%)")
+    print("=======================================================\n")
+
+
+# =====================================================================
+# ENTRY POINT
+# =====================================================================
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Confidence-Aware Dual-Engine IoT NIDS")
     parser.add_argument('--dataset', type=str, default='data/UNSW_NB15_combined.csv')
-    parser.add_argument('--test_dataset', type=str, default=None)
     parser.add_argument('--dataset_name', type=str, default='UNSW-NB15', choices=['UNSW-NB15', 'CIC-IDS2018', 'CIC-IOT2023'])
     parser.add_argument('--model', type=str, default='dual-engine', choices=['proposed', 'dual-engine', 'cnn', 'resnet', 'resnest', 'resnet-gru'])
     parser.add_argument('--target_col', type=str, default='attack_cat')
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=0.001)
-    parser.add_argument('--test_size', type=float, default=0.2)
-    parser.add_argument('--balance', action='store_true', help='Enable ADASYN minority class balancing')
-    parser.add_argument('--hide_class', type=str, default=None)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--balance', action='store_true', help='Enable categorical-aware minority class balancing')
+    parser.add_argument('--hide_class', type=str, default=None, help='Class to hide for zero-day LOCO test')
+    parser.add_argument('--kfold', type=int, default=0, help='Set > 1 (e.g., 5) for K-Fold CV; 0 for 3-way split')
     args = parser.parse_args()
-    train_and_evaluate(args)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Compute Device: {device}")
+
+    if args.kfold > 1:
+        run_kfold_experiment(args, device)
+    else:
+        run_single_experiment(args, device)

@@ -1,62 +1,76 @@
-import pandas as pd
 import numpy as np
-from imblearn.over_sampling import ADASYN
-from sklearn.preprocessing import LabelEncoder
+import pandas as pd
+from collections import Counter
+from imblearn.over_sampling import SMOTENC, ADASYN, RandomOverSampler
 
 class ADASYNBalancer:
-    def __init__(self, target_col='attack_cat', random_state=42):
+    """
+    Categorical-Aware Imbalance Balancer:
+    - Automatically identifies categorical vs continuous columns.
+    - Uses SMOTENC when categorical features are present to prevent fractional artifact corruption.
+    - Constrains oversampling so minority classes are balanced up to a sensible ratio (capped at 40% of majority)
+      to prevent synthetic dense clusters and decision boundary disruption.
+    """
+    def __init__(self, target_col='attack_cat', max_minority_ratio=0.4, random_state=42):
         self.target_col = target_col
+        self.max_minority_ratio = max_minority_ratio
         self.random_state = random_state
 
     def balance_dataset(self, df):
-        """
-        Balances minority classes in tabular dataset using ADASYN.
-        Handles categorical label encoding, imputation, and oversampling.
-        """
-        df_balanced = df.copy()
-        
-        # Clean infinite values and NaNs prior to ADASYN
-        df_balanced = df_balanced.replace([np.inf, -np.inf], np.nan).fillna(0)
-        
-        y = df_balanced[self.target_col].astype(str)
-        X = df_balanced.drop(columns=[self.target_col])
+        if self.target_col not in df.columns:
+            return df
 
-        # ADASYN requires numeric feature inputs
-        temp_encoders = {}
-        X_numeric = pd.DataFrame()
-        for col in X.columns:
-            if X[col].dtype == 'object':
-                le = LabelEncoder()
-                X_numeric[col] = le.fit_transform(X[col].astype(str))
-                temp_encoders[col] = le
+        df = df.copy()
+        y = df[self.target_col]
+        X = df.drop(columns=[self.target_col])
+
+        counts = Counter(y)
+        majority_count = max(counts.values())
+        target_cap = max(50, int(majority_count * self.max_minority_ratio))
+
+        sampling_strategy = {}
+        for cls_name, count in counts.items():
+            if count < target_cap:
+                # Require at least 6 samples to build valid k-NN graphs
+                if count < 6:
+                    sampling_strategy[cls_name] = max(count, 6)
+                else:
+                    sampling_strategy[cls_name] = target_cap
             else:
-                X_numeric[col] = pd.to_numeric(X[col], errors='coerce').fillna(0)
+                sampling_strategy[cls_name] = count
 
-        # Check minority classes that have too few samples for default n_neighbors=5
-        class_counts = y.value_counts()
-        min_samples = class_counts.min()
-        
-        # Adaptive neighbor adjustment if rare class has < 6 samples
-        n_neighbors = min(5, max(1, min_samples - 1))
-        
-        print(f"Applying ADASYN oversampling (n_neighbors={n_neighbors})...")
+        # Detect categorical column indices
+        cat_indices = []
+        for idx, col in enumerate(X.columns):
+            if X[col].dtype == 'object' or str(X[col].dtype).startswith('category'):
+                cat_indices.append(idx)
+
+        print(f"  [*] Initial Class Distribution: {dict(counts)}")
+        print(f"  [*] Target Sampling Caps: {sampling_strategy}")
+
+        # Choose appropriate balancer based on feature types
         try:
-            adasyn = ADASYN(sampling_strategy='auto', n_neighbors=n_neighbors, random_state=self.random_state)
-            X_res, y_res = adasyn.fit_resample(X_numeric, y)
+            if len(cat_indices) > 0:
+                print(f"  [*] Detected {len(cat_indices)} categorical features. Using SMOTENC.")
+                sampler = SMOTENC(
+                    categorical_features=cat_indices,
+                    sampling_strategy=sampling_strategy,
+                    k_neighbors=min(5, min(counts.values()) - 1 if min(counts.values()) > 1 else 1),
+                    random_state=self.random_state
+                )
+            else:
+                sampler = ADASYN(
+                    sampling_strategy=sampling_strategy,
+                    n_neighbors=min(5, min(counts.values()) - 1 if min(counts.values()) > 1 else 1),
+                    random_state=self.random_state
+                )
+            X_res, y_res = sampler.fit_resample(X, y)
         except Exception as e:
-            print(f"ADASYN warning: {e}. Falling back to n_neighbors=1.")
-            adasyn = ADASYN(sampling_strategy='auto', n_neighbors=1, random_state=self.random_state)
-            X_res, y_res = adasyn.fit_resample(X_numeric, y)
+            print(f"  [!] Interpolation balancer failed ({e}). Falling back to safe RandomOverSampler.")
+            sampler = RandomOverSampler(sampling_strategy=sampling_strategy, random_state=self.random_state)
+            X_res, y_res = sampler.fit_resample(X, y)
 
-        # Decode string columns back for consistency with downstream preprocessors
-        X_res_df = pd.DataFrame(X_res, columns=X.columns)
-        for col, le in temp_encoders.items():
-            # Round nearest integer labels generated by ADASYN interpolation
-            rounded_vals = np.clip(np.round(X_res_df[col].values).astype(int), 0, len(le.classes_) - 1)
-            X_res_df[col] = le.inverse_transform(rounded_vals)
-
-        X_res_df[self.target_col] = y_res.values
-        print("Final balanced distribution with ADASYN:")
-        print(X_res_df[self.target_col].value_counts())
-        
-        return X_res_df
+        resampled_df = pd.DataFrame(X_res, columns=X.columns)
+        resampled_df[self.target_col] = y_res
+        print(f"  [*] Post-Balancing Class Distribution: {dict(Counter(y_res))}")
+        return resampled_df
