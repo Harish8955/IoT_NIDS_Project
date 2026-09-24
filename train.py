@@ -16,7 +16,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split, StratifiedKFold
 
-# Add local path and src path
+# Ensure paths resolve cleanly
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SRC_DIR = os.path.join(BASE_DIR, "src")
 for p in [BASE_DIR, SRC_DIR]:
@@ -128,7 +128,7 @@ def pretrain_engine1(model, X_train, y_train, normal_idx, device, batch_size=64,
 # =====================================================================
 def run_single_experiment(args, device):
     set_seed(args.seed)
-    balance_suffix = "balanced" if args.balance else "raw"
+    balance_suffix = f"{args.balancer}_balanced" if args.balance else "raw"
     ds_prefix = args.dataset_name.lower().replace("-", "_")
     hide_suffix = f"_loco_{args.hide_class.lower()}" if args.hide_class else ""
     exp_name = f"{ds_prefix}_{args.model}{hide_suffix}_{balance_suffix}_{args.epochs}ep"
@@ -154,8 +154,12 @@ def run_single_experiment(args, device):
 
     # Balancing applied ONLY on Training Partition
     if args.balance:
-        print("\n--- STAGE: Minority Class Balancing (Training Partition Only) ---")
-        balancer = AdaptiveClassBalancer(target_col=args.target_col, random_state=args.seed)
+        print(f"\n--- STAGE: Minority Class Balancing via {args.balancer.upper()} (Training Partition Only) ---")
+        balancer = AdaptiveClassBalancer(
+            target_col=args.target_col, 
+            random_state=args.seed,
+            preferred_sampler=args.balancer
+        )
         train_df = balancer.balance_dataset(train_df)
 
     print("\n--- STAGE: Feature Preprocessing & Normalization ---")
@@ -326,8 +330,9 @@ def run_single_experiment(args, device):
 # =====================================================================
 def run_kfold_experiment(args, device):
     set_seed(args.seed)
+    balance_suffix = f"{args.balancer}_balanced" if args.balance else "raw"
     ds_prefix = args.dataset_name.lower().replace("-", "_")
-    exp_dir_name = f"{ds_prefix}_{args.model}_{args.kfold}fold_{args.epochs}ep"
+    exp_dir_name = f"{ds_prefix}_{args.model}_{balance_suffix}_{args.kfold}fold_{args.epochs}ep"
     results_dir = os.path.join("results", exp_dir_name)
     os.makedirs(results_dir, exist_ok=True)
 
@@ -350,8 +355,12 @@ def run_kfold_experiment(args, device):
         val_df = raw_df.iloc[val_idx].copy()
 
         if args.balance:
-            print("  [*] Applying Categorical-Aware Balancing on Training Fold...")
-            balancer = AdaptiveClassBalancer(target_col=args.target_col, random_state=args.seed)
+            print(f"  [*] Applying {args.balancer.upper()} Balancing on Training Fold...")
+            balancer = AdaptiveClassBalancer(
+                target_col=args.target_col, 
+                random_state=args.seed,
+                preferred_sampler=args.balancer
+            )
             train_df = balancer.balance_dataset(train_df)
 
         X_train, X_val, y_train, y_val, preprocessor, _ = prepare_official_split(
@@ -508,7 +517,9 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=0.001)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--balance', action='store_true', help='Enable categorical-aware minority class balancing')
+    parser.add_argument('--balance', action='store_true', help='Enable minority class balancing')
+    parser.add_argument('--balancer', type=str, default='adasyn', choices=['adasyn', 'smotenc', 'random', 'auto'],
+                        help='Balancer algorithm: adasyn, smotenc, random, or auto')
     parser.add_argument('--hide_class', type=str, default=None, help='Class to hide for zero-day LOCO test')
     parser.add_argument('--kfold', type=int, default=0, help='Set > 1 (e.g., 5) for K-Fold CV; 0 for 3-way split')
     args = parser.parse_args()
