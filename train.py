@@ -119,7 +119,7 @@ def pretrain_engine1(model, X_train, y_train, normal_idx, device, batch_size=64,
             running_loss += loss_ae.item() * x_b.size(0)
         
         if ae_ep % 2 == 0 or ae_ep == epochs:
-            avg_loss = running_loss / len(X_train_benign)
+            avg_loss = running_loss / len(X_train_benign) if len(X_train_benign) > 0 else 0.0
             print(f"      AE Epoch [{ae_ep}/{epochs}] | Benign Recon MSE: {avg_loss:.6f}")
 
 
@@ -174,7 +174,7 @@ def run_single_experiment(args, device):
     
     normal_idx = 0
     for idx, c in enumerate(class_names):
-        if c.lower() in ['normal', 'benign']:
+        if c.lower() in ['normal', 'benign', 'benigntraffic']:
             normal_idx = idx
             break
 
@@ -226,8 +226,9 @@ def run_single_experiment(args, device):
             correct += (preds == y_batch).sum().item()
 
         scheduler.step()
-        train_losses.append(running_loss / total)
-        train_accs.append(correct / total)
+        epoch_acc = correct / total if total > 0 else 0.0
+        train_losses.append(running_loss / total if total > 0 else 0.0)
+        train_accs.append(epoch_acc)
 
         # Validation per Epoch
         model.eval()
@@ -242,8 +243,8 @@ def run_single_experiment(args, device):
                 v_total += y_v.size(0)
                 v_correct += (p == y_v).sum().item()
 
-        val_acc = v_correct / v_total
-        val_losses.append(v_loss / v_total)
+        val_acc = v_correct / v_total if v_total > 0 else 0.0
+        val_losses.append(v_loss / v_total if v_total > 0 else 0.0)
         val_accs.append(val_acc)
 
         if val_acc > best_val_acc:
@@ -260,7 +261,6 @@ def run_single_experiment(args, device):
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
 
-    # Dynamically calibrate Tau & Theta using validation data before final inference
     if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
         calibrate_dual_engine_thresholds(model, val_loader, normal_idx, device)
 
@@ -326,13 +326,14 @@ def run_single_experiment(args, device):
 
 
 # =====================================================================
-# 2. STRATIFIED K-FOLD PIPELINE (WITH BEST-MODEL RESTORATION)
+# 2. STRATIFIED K-FOLD PIPELINE (WITH LOCO AND BEST-MODEL RESTORATION)
 # =====================================================================
 def run_kfold_experiment(args, device):
     set_seed(args.seed)
     balance_suffix = f"{args.balancer}_balanced" if args.balance else "raw"
     ds_prefix = args.dataset_name.lower().replace("-", "_")
-    exp_dir_name = f"{ds_prefix}_{args.model}_{balance_suffix}_{args.kfold}fold_{args.epochs}ep"
+    hide_suffix = f"_loco_{args.hide_class.lower()}" if args.hide_class else ""
+    exp_dir_name = f"{ds_prefix}_{args.model}{hide_suffix}_{balance_suffix}_{args.kfold}fold_{args.epochs}ep"
     results_dir = os.path.join("results", exp_dir_name)
     os.makedirs(results_dir, exist_ok=True)
 
@@ -354,6 +355,13 @@ def run_kfold_experiment(args, device):
         train_df = raw_df.iloc[train_idx].copy()
         val_df = raw_df.iloc[val_idx].copy()
 
+        # Isolate hidden zero-day class completely from fold train AND fold val to avoid cross-entropy index assertion failure
+        zero_day_val_df = None
+        if args.hide_class:
+            zero_day_val_df = val_df[val_df[args.target_col].astype(str).str.lower() == args.hide_class.lower()].copy()
+            val_df = val_df[val_df[args.target_col].astype(str).str.lower() != args.hide_class.lower()].copy()
+            train_df = train_df[train_df[args.target_col].astype(str).str.lower() != args.hide_class.lower()].copy()
+
         if args.balance:
             print(f"  [*] Applying {args.balancer.upper()} Balancing on Training Fold...")
             balancer = AdaptiveClassBalancer(
@@ -364,7 +372,7 @@ def run_kfold_experiment(args, device):
             train_df = balancer.balance_dataset(train_df)
 
         X_train, X_val, y_train, y_val, preprocessor, _ = prepare_official_split(
-            train_df, val_df, target_col=args.target_col, hide_class=args.hide_class
+            train_df, val_df, target_col=args.target_col, hide_class=None
         )
 
         num_features = X_train.shape[1]
@@ -373,7 +381,7 @@ def run_kfold_experiment(args, device):
         
         normal_idx = 0
         for idx, c in enumerate(class_names):
-            if c.lower() in ['normal', 'benign']:
+            if c.lower() in ['normal', 'benign', 'benigntraffic']:
                 normal_idx = idx
                 break
 
@@ -416,8 +424,8 @@ def run_kfold_experiment(args, device):
                 correct += (preds == y_b).sum().item()
 
             scheduler.step()
-            train_losses.append(running_loss / total)
-            train_accs.append(correct / total)
+            train_losses.append(running_loss / total if total > 0 else 0.0)
+            train_accs.append(correct / total if total > 0 else 0.0)
 
             model.eval()
             v_loss, v_correct, v_total = 0.0, 0, 0
@@ -431,8 +439,8 @@ def run_kfold_experiment(args, device):
                     v_total += y_v.size(0)
                     v_correct += (p == y_v).sum().item()
 
-            current_val_acc = v_correct / v_total
-            val_losses.append(v_loss / v_total)
+            current_val_acc = v_correct / v_total if v_total > 0 else 0.0
+            val_losses.append(v_loss / v_total if v_total > 0 else 0.0)
             val_accs.append(current_val_acc)
 
             if current_val_acc > best_val_acc:
@@ -465,6 +473,18 @@ def run_kfold_experiment(args, device):
         metrics['fold'] = fold
         metrics['best_val_accuracy'] = best_val_acc
         metrics['final_val_accuracy'] = metrics['accuracy']
+
+        # Evaluate Zero-Day LOCO on this fold if specified
+        if zero_day_val_df is not None and len(zero_day_val_df) > 0 and args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
+            X_zd, _ = preprocessor.transform(zero_day_val_df)
+            X_zd_tensor = torch.tensor(X_zd, dtype=torch.float32).to(device)
+            with torch.no_grad():
+                verdicts, _, _, _ = model.predict_verdict(X_zd_tensor, normal_class_idx=normal_idx)
+                zd_detected = (verdicts == 2).sum().item()
+                zd_acc = (zd_detected / len(X_zd_tensor)) * 100
+                metrics['zero_day_isolation_acc'] = zd_acc
+                print(f"  [Fold {fold} Zero-Day LOCO] Detected {zd_detected}/{len(X_zd_tensor)} ({zd_acc:.2f}%)")
+
         fold_metrics.append(metrics)
 
         torch.save(best_model_state, os.path.join(fold_dir, "best_model.pt"))
@@ -491,6 +511,11 @@ def run_kfold_experiment(args, device):
         "folds": fold_metrics
     }
 
+    if args.hide_class and 'zero_day_isolation_acc' in fold_metrics[0]:
+        zd_accs = [m['zero_day_isolation_acc'] for m in fold_metrics]
+        summary["mean_zero_day_isolation_acc"] = float(np.mean(zd_accs))
+        summary["std_zero_day_isolation_acc"] = float(np.std(zd_accs))
+
     with open(os.path.join(results_dir, "kfold_summary.json"), "w") as f:
         json.dump(summary, f, indent=4)
 
@@ -501,6 +526,8 @@ def run_kfold_experiment(args, device):
     print(f"  MACRO F1    : {summary['mean_f1_macro']:.2f}% (+/- {summary['std_f1_macro']:.2f}%)")
     print(f"  DETECTION RT: {summary['mean_detection_rate']:.2f}% (+/- {summary['std_detection_rate']:.2f}%)")
     print(f"  FALSE ALARM : {summary['mean_false_alarm_rate']:.2f}% (+/- {summary['std_false_alarm_rate']:.2f}%)")
+    if "mean_zero_day_isolation_acc" in summary:
+        print(f"  ZERO-DAY ACC: {summary['mean_zero_day_isolation_acc']:.2f}% (+/- {summary['std_zero_day_isolation_acc']:.2f}%)")
     print("=======================================================\n")
 
 
