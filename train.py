@@ -16,7 +16,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split, StratifiedKFold
 
-# Ensure paths resolve cleanly
+# Add local path and src path
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SRC_DIR = os.path.join(BASE_DIR, "src")
 for p in [BASE_DIR, SRC_DIR]:
@@ -247,7 +247,7 @@ def run_single_experiment(args, device):
             best_model_state = copy.deepcopy(model.state_dict())
 
         if epoch % max(1, args.epochs // 10) == 0 or epoch == args.epochs:
-            print(f"Epoch [{epoch}/{args.epochs}] | Train Acc: {train_accs[-1]*100:.2f}% | Val Acc: {val_acc*100:.2f}%")
+            print(f"Epoch [{epoch}/{args.epochs}] | Train Acc: {epoch_acc*100:.2f}% | Val Acc: {val_acc*100:.2f}%")
 
     last_model_state = copy.deepcopy(model.state_dict())
 
@@ -437,6 +437,10 @@ def run_kfold_experiment(args, device):
         print(f"  [*] Restoring Fold {fold} best checkpoint for evaluation...")
         if best_model_state is not None:
             model.load_state_dict(best_model_state)
+
+        # Dynamic validation threshold tuning per fold
+        if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
+            calibrate_dual_engine_thresholds(model, val_loader, normal_idx, device)
 
         model.eval()
         y_preds, y_trues = [], []

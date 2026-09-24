@@ -25,32 +25,31 @@ class SplitAttention1D(nn.Module):
         self.fc2 = nn.Linear(inter_channels, channels * radix)
 
     def forward(self, x):
-        # Input shape: (B, channels * radix, L)
         batch_size = x.size(0)
         
         # Split along channel dimension into radix branches: list of (B, channels, L)
         splits = torch.split(x, self.channels, dim=1)
         
         # Element-wise summation across cardinal splits: U_tilde = sum(U_i)
-        u_tilde = sum(splits)  # Shape: (B, channels, L)
+        u_tilde = sum(splits)
         
         # Global context vector via 1D average pooling
-        gap = u_tilde.mean(dim=-1)  # Shape: (B, channels)
+        gap = u_tilde.mean(dim=-1)
         
         # Dense channel attention
         att = self.fc1(gap)
         att = self.bn1(att)
         att = self.relu(att)
-        att = self.fc2(att)  # Shape: (B, channels * radix)
+        att = self.fc2(att)
         
         # Reshape to (B, radix, channels) and apply softmax over radix dimension
         att = att.view(batch_size, self.radix, self.channels)
-        att = F.softmax(att, dim=1)  # Shape: (B, radix, channels)
+        att = F.softmax(att, dim=1)
         
         # Channel-wise weighted sum across radix branches
         out = 0
         for r, split in enumerate(splits):
-            weight_r = att[:, r, :].unsqueeze(-1)  # Shape: (B, channels, 1)
+            weight_r = att[:, r, :].unsqueeze(-1)
             out = out + (split * weight_r)
             
         return out

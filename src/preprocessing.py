@@ -17,9 +17,7 @@ class TrafficDataPreprocessor:
         return np.nan_to_num(X_mat, nan=0.0, posinf=0.0, neginf=0.0)
 
     def fit_transform(self, df, hide_class=None):
-        """
-        Preprocesses raw tabular traffic data.
-        """
+        """Preprocesses raw tabular traffic data (Fitted on Training data)."""
         df = df.copy()
 
         for col_to_drop in ['id', 'ID', 'Id', 'Unnamed: 0']:
@@ -54,7 +52,6 @@ class TrafficDataPreprocessor:
         X_encoded = pd.DataFrame()
         for col in self.feature_cols:
             if X_df[col].dtype == 'object' or (len(X_df[col]) > 0 and isinstance(X_df[col].iloc[0], str)):
-                # Try numeric conversion first in case numbers are formatted as strings
                 num_conv = pd.to_numeric(X_df[col], errors='coerce')
                 if num_conv.notna().sum() > (0.5 * len(X_df[col])):
                     X_encoded[col] = num_conv.replace([np.inf, -np.inf], np.nan).fillna(0)
@@ -75,13 +72,14 @@ class TrafficDataPreprocessor:
         denom[np.isnan(denom)] = 1.0
         denom[np.isinf(denom)] = 1.0
 
-        X_norm = ((X_mat - self.feature_mins) / denom) * 255.0
+        # Normalization to [0, 1] for neural network convergence
+        X_norm = (X_mat - self.feature_mins) / denom
         X_norm = self._sanitize_matrix(X_norm)
 
         return X_norm, y, zero_day_df
 
     def transform(self, df):
-        """Transform test set using fitted training parameters."""
+        """Transform test/validation/zero-day set using fitted training parameters."""
         df = df.copy()
 
         for col_to_drop in ['id', 'ID', 'Id', 'Unnamed: 0']:
@@ -99,16 +97,13 @@ class TrafficDataPreprocessor:
 
         if self.target_col in df.columns:
             valid_classes = set(self.target_encoder.classes_)
-            # Safely extract target label y for known classes, else None for zero-day hidden classes
+            y = np.array([-1] * len(df))
             valid_mask = df[self.target_col].isin(valid_classes)
             if valid_mask.any():
-                y = np.array([-1] * len(df))
                 y[valid_mask] = self.target_encoder.transform(df[self.target_col][valid_mask])
-            else:
-                y = None
             X_df = df.drop(columns=[self.target_col])
         else:
-            y = None
+            y = np.array([-1] * len(df))
             X_df = df
 
         X_encoded = pd.DataFrame()
@@ -131,7 +126,8 @@ class TrafficDataPreprocessor:
         denom[np.isnan(denom)] = 1.0
         denom[np.isinf(denom)] = 1.0
 
-        X_norm = ((X_mat - self.feature_mins) / denom) * 255.0
+        # Normalization to [0, 1]
+        X_norm = (X_mat - self.feature_mins) / denom
         X_norm = self._sanitize_matrix(X_norm)
 
         return X_norm, y
@@ -139,7 +135,6 @@ class TrafficDataPreprocessor:
 def prepare_train_test_split(df, target_col='attack_cat', test_size=0.2, random_state=42, hide_class=None):
     preprocessor = TrafficDataPreprocessor(target_col=target_col)
     X_norm, y, zero_day_df = preprocessor.fit_transform(df, hide_class=hide_class)
-    
     X_train, X_test, y_train, y_test = train_test_split(
         X_norm, y, test_size=test_size, random_state=random_state, stratify=y
     )
