@@ -119,6 +119,8 @@ def plot_learning_curves(history, save_path):
 
     # Loss Curve
     ax1.plot(epochs, history["train_loss"], 'b-', lw=1.8, label='Train Loss')
+    if "test_loss" in history:
+        ax1.plot(epochs, history["test_loss"], color='darkorange', linestyle=':', lw=1.8, label='Test Loss')
     ax1.plot(epochs, history["val_loss"], 'r--', lw=1.8, label='Validation Loss')
     ax1.set_title('Cross-Entropy Loss vs. Epochs', fontsize=12, pad=10)
     ax1.set_xlabel('Epochs', fontsize=11)
@@ -129,6 +131,8 @@ def plot_learning_curves(history, save_path):
     # Accuracy Curve
     ax2.plot(epochs, [a * 100 for a in history["train_acc"]], 'b-', lw=1.8, label='Train Accuracy')
     ax2.plot(epochs, [a * 100 for a in history["val_acc"]], 'g--', lw=1.8, label='Validation Accuracy')
+    if "test_acc" in history:
+        ax2.plot(epochs, [a * 100 for a in history["test_acc"]], color='darkorange', linestyle=':', lw=1.8, label='Test Accuracy')
     if "val_macro_f1" in history:
         ax2.plot(epochs, [a * 100 for a in history["val_macro_f1"]], color='darkorange', linestyle=':', lw=1.8, label='Validation Macro-F1')
     ax2.set_title('Classification Accuracy (%) vs. Epochs', fontsize=12, pad=10)
@@ -327,7 +331,7 @@ def run_single_experiment(args, device):
     if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
         pretrain_engine1(model, X_train, y_train, normal_idx, device, batch_size=args.batch_size, lr=args.lr, epochs=10)
 
-    history = {"epoch": [], "train_loss": [], "train_acc": [], "val_loss": [], "val_acc": [], "val_macro_f1": []}
+    history = {"epoch": [], "train_loss": [], "train_acc": [], "val_loss": [], "val_acc": [], "val_macro_f1": [], "test_loss": [], "test_acc": []}
     best_val_f1 = -1.0
     best_model_state = None
     stale_epochs = 0
@@ -348,7 +352,6 @@ def run_single_experiment(args, device):
             total += y_b.size(0)
             correct += (preds == y_b).sum().item()
 
-        scheduler.step()
         epoch_train_acc = correct / total if total > 0 else 0.0
         epoch_train_loss = running_loss / total if total > 0 else 0.0
 
@@ -356,6 +359,11 @@ def run_single_experiment(args, device):
             model, val_loader, criterion_cls, device
         )
         scheduler.step(epoch_val_loss)
+        # Test curves are recorded for visibility only; test scores never select
+        # checkpoints, tune thresholds, or drive the learning-rate scheduler.
+        epoch_test_loss, epoch_test_acc, _ = evaluate_classifier(
+            model, test_loader, criterion_cls, device
+        )
 
         history["epoch"].append(epoch)
         history["train_loss"].append(epoch_train_loss)
@@ -363,6 +371,8 @@ def run_single_experiment(args, device):
         history["val_loss"].append(epoch_val_loss)
         history["val_acc"].append(epoch_val_acc)
         history["val_macro_f1"].append(epoch_val_f1)
+        history["test_loss"].append(epoch_test_loss)
+        history["test_acc"].append(epoch_test_acc)
 
         if epoch_val_f1 > best_val_f1 + args.min_delta:
             best_val_f1 = epoch_val_f1
@@ -377,6 +387,7 @@ def run_single_experiment(args, device):
             print(f"Early stopping at epoch {epoch}; validation macro-F1 did not improve for {args.patience} epochs.")
             break
 
+    last_model_state = copy.deepcopy(model.state_dict())
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
 
@@ -407,7 +418,12 @@ def run_single_experiment(args, device):
     y_probs = np.array(y_probs)
 
     metrics = compute_metrics(y_trues, y_preds, normal_idx=normal_idx, num_classes=num_classes)
-    metrics['final_train_accuracy'] = history["train_acc"][-1]
+    best_train_loss, best_train_accuracy, _ = evaluate_classifier(
+        model, train_loader, criterion_cls, device
+    )
+    metrics['train_accuracy'] = best_train_accuracy
+    metrics['train_loss'] = best_train_loss
+    metrics['final_train_accuracy'] = best_train_accuracy
     metrics['best_val_macro_f1'] = best_val_f1
     metrics['test_accuracy'] = metrics['accuracy']
     metrics['inference_latency_ms'] = latency_ms
@@ -437,6 +453,7 @@ def run_single_experiment(args, device):
             print(f"  [+] Zero-Day Isolation Rate: {detected}/{len(X_zd_tensor)} ({pct:.2f}%)")
 
     torch.save(best_model_state, os.path.join(results_dir, "best_model.pt"))
+    torch.save(last_model_state, os.path.join(results_dir, "last_model.pt"))
     with open(os.path.join(results_dir, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=4)
 
@@ -532,7 +549,6 @@ def run_kfold_experiment(args, device):
                 total += y_b.size(0)
                 correct += (preds == y_b).sum().item()
 
-            scheduler.step()
             epoch_train_loss = running_loss / total if total > 0 else 0.0
             epoch_train_acc = correct / total if total > 0 else 0.0
 
@@ -561,6 +577,7 @@ def run_kfold_experiment(args, device):
                 print(f"  Early stopping at epoch {epoch}; validation macro-F1 did not improve for {args.patience} epochs.")
                 break
 
+        last_model_state = copy.deepcopy(model.state_dict())
         if best_model_state is not None:
             model.load_state_dict(best_model_state)
 
@@ -586,7 +603,13 @@ def run_kfold_experiment(args, device):
 
         metrics = compute_metrics(y_trues, y_preds, normal_idx=normal_idx, num_classes=num_classes)
         metrics['fold'] = fold
-        metrics['final_train_accuracy'] = float(history["train_acc"][-1])
+        train_loss_best, train_accuracy_best, _ = evaluate_classifier(
+            model, train_loader, criterion_cls, device
+        )
+        metrics['train_accuracy'] = float(train_accuracy_best)
+        metrics['train_loss'] = float(train_loss_best)
+        metrics['final_train_accuracy'] = float(train_accuracy_best)
+        metrics['test_accuracy'] = float(metrics['accuracy'])
         metrics['best_val_macro_f1'] = float(best_val_f1)
         metrics['final_test_val_accuracy'] = float(metrics['accuracy'])
 
@@ -606,7 +629,7 @@ def run_kfold_experiment(args, device):
 
         # Save Fold Models, Data & Plots
         torch.save(best_model_state, os.path.join(fold_dir, "best_model.pt"))
-        torch.save(model.state_dict(), os.path.join(fold_dir, "last_model.pt"))
+        torch.save(last_model_state, os.path.join(fold_dir, "last_model.pt"))
         with open(os.path.join(fold_dir, "preprocessor.pkl"), "wb") as f:
             pickle.dump(preprocessor, f)
         with open(os.path.join(fold_dir, "history.json"), "w") as f:
