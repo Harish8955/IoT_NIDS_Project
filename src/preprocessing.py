@@ -11,6 +11,8 @@ class TrafficDataPreprocessor:
         self.feature_mins = None
         self.feature_maxs = None
         self.feature_cols = []
+        self.categorical_cols = []
+        self.encoded_feature_cols = []
 
     def _sanitize_matrix(self, X_mat):
         """Replaces NaN, +Inf, -Inf with 0.0"""
@@ -29,7 +31,9 @@ class TrafficDataPreprocessor:
 
         if self.target_col in df.columns:
             df[self.target_col] = df[self.target_col].astype(str).str.strip()
-            df = df[~df[self.target_col].isin(['Analysis', 'Backdoor', 'Backdoors', 'nan', '0', '0.0', 'Label', 'label'])]
+            # Analysis and Backdoor are valid UNSW-NB15 classes; numeric zero may
+            # also be a valid benign label. Remove only missing/header sentinels.
+            df = df[~df[self.target_col].isin(['nan', 'None', 'Label', 'label'])]
 
         df = df.replace([np.inf, -np.inf], np.nan).fillna(0)
 
@@ -48,19 +52,12 @@ class TrafficDataPreprocessor:
             X_df = df
 
         self.feature_cols = X_df.columns.tolist()
-
-        X_encoded = pd.DataFrame()
-        for col in self.feature_cols:
-            if X_df[col].dtype == 'object' or (len(X_df[col]) > 0 and isinstance(X_df[col].iloc[0], str)):
-                num_conv = pd.to_numeric(X_df[col], errors='coerce')
-                if num_conv.notna().sum() > (0.5 * len(X_df[col])):
-                    X_encoded[col] = num_conv.replace([np.inf, -np.inf], np.nan).fillna(0)
-                else:
-                    le = LabelEncoder()
-                    X_encoded[col] = le.fit_transform(X_df[col].astype(str))
-                    self.label_encoders[col] = le
-            else:
-                X_encoded[col] = pd.to_numeric(X_df[col], errors='coerce').replace([np.inf, -np.inf], np.nan).fillna(0)
+        self.categorical_cols = [
+            col for col in self.feature_cols
+            if X_df[col].dtype == 'object' or str(X_df[col].dtype).startswith('category')
+        ]
+        X_encoded = self._encode_features(X_df, fit=True)
+        self.encoded_feature_cols = X_encoded.columns.tolist()
 
         X_mat = self._sanitize_matrix(X_encoded.values.astype(np.float32))
 
@@ -91,7 +88,7 @@ class TrafficDataPreprocessor:
 
         if self.target_col in df.columns:
             df[self.target_col] = df[self.target_col].astype(str).str.strip()
-            df = df[~df[self.target_col].isin(['Analysis', 'Backdoor', 'Backdoors', 'nan', '0', '0.0', 'Label', 'label'])]
+            df = df[~df[self.target_col].isin(['nan', 'None', 'Label', 'label'])]
 
         df = df.replace([np.inf, -np.inf], np.nan).fillna(0)
 
@@ -106,18 +103,7 @@ class TrafficDataPreprocessor:
             y = np.array([-1] * len(df))
             X_df = df
 
-        X_encoded = pd.DataFrame()
-        for col in self.feature_cols:
-            if col in X_df.columns:
-                if col in self.label_encoders:
-                    le = self.label_encoders[col]
-                    X_encoded[col] = X_df[col].astype(str).map(
-                        lambda s: le.transform([s])[0] if s in le.classes_ else 0
-                    )
-                else:
-                    X_encoded[col] = pd.to_numeric(X_df[col], errors='coerce').replace([np.inf, -np.inf], np.nan).fillna(0)
-            else:
-                X_encoded[col] = 0
+        X_encoded = self._encode_features(X_df, fit=False)
 
         X_mat = self._sanitize_matrix(X_encoded.values.astype(np.float32))
         
@@ -131,6 +117,21 @@ class TrafficDataPreprocessor:
         X_norm = self._sanitize_matrix(X_norm)
 
         return X_norm, y
+
+    def _encode_features(self, X_df, fit):
+        """One-hot encode categorical traffic fields using training columns only."""
+        frame = X_df.reindex(columns=self.feature_cols).copy()
+        for col in self.feature_cols:
+            if col not in self.categorical_cols:
+                frame[col] = pd.to_numeric(frame[col], errors='coerce').replace(
+                    [np.inf, -np.inf], np.nan
+                ).fillna(0)
+            else:
+                frame[col] = frame[col].fillna('__missing__').astype(str)
+        encoded = pd.get_dummies(frame, columns=self.categorical_cols, dtype=np.float32)
+        if fit:
+            return encoded
+        return encoded.reindex(columns=self.encoded_feature_cols, fill_value=0)
 
 def prepare_train_test_split(df, target_col='attack_cat', test_size=0.2, random_state=42, hide_class=None):
     preprocessor = TrafficDataPreprocessor(target_col=target_col)

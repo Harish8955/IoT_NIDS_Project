@@ -19,7 +19,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 from sklearn.model_selection import train_test_split, StratifiedKFold
-from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc
+from sklearn.metrics import confusion_matrix, classification_report, roc_curve, auc, f1_score
 from sklearn.preprocessing import label_binarize
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +30,7 @@ for p in [BASE_DIR, SRC_DIR]:
 
 from preprocessing import prepare_official_split
 from adasyn_balancer import AdaptiveClassBalancer
+from ctgan_balancer import CTGANBalancer
 from model import get_model
 from utils import compute_metrics, save_experiment_results, print_paper_comparison_table
 
@@ -46,6 +47,69 @@ def set_seed(seed=42):
     torch.backends.cudnn.benchmark = False
 
 
+class FocalLoss(nn.Module):
+    def __init__(self, class_weights=None, gamma=2.0):
+        super().__init__()
+        self.register_buffer('class_weights', class_weights)
+        self.gamma = gamma
+
+    def forward(self, logits, targets):
+        log_pt = F.log_softmax(logits, dim=1).gather(1, targets.unsqueeze(1)).squeeze(1)
+        pt = log_pt.exp()
+        loss = -((1.0 - pt) ** self.gamma) * log_pt
+        if self.class_weights is not None:
+            loss = loss * self.class_weights[targets]
+        return loss.mean()
+
+
+def make_classifier_loss(args, y_train, num_classes, device):
+    weights = None
+    if args.loss in ('weighted', 'focal'):
+        counts = np.bincount(np.asarray(y_train, dtype=np.int64), minlength=num_classes)
+        if np.any(counts == 0):
+            raise ValueError('Every classifier class must have at least one training sample.')
+        weights = len(y_train) / (num_classes * counts.astype(np.float64))
+        weights = torch.tensor(weights, dtype=torch.float32, device=device)
+        # Keep the average class weight at one to preserve the learning-rate scale.
+        weights = weights / weights.mean()
+    if args.loss == 'focal':
+        return FocalLoss(class_weights=weights, gamma=args.focal_gamma)
+    return nn.CrossEntropyLoss(
+        weight=weights,
+        label_smoothing=args.label_smoothing if args.loss == 'cross_entropy' else 0.0
+    )
+
+
+def balance_training_data(train_df, args, seed):
+    if not args.balance:
+        return train_df
+    if args.balancer == 'ctgan':
+        return CTGANBalancer(target_col=args.target_col, epochs=args.ctgan_epochs).balance_dataset(train_df)
+    balancer = AdaptiveClassBalancer(
+        target_col=args.target_col, random_state=seed, preferred_sampler=args.balancer
+    )
+    return balancer.balance_dataset(train_df)
+
+
+def evaluate_classifier(model, loader, criterion, device):
+    model.eval()
+    total_loss, total = 0.0, 0
+    y_true, y_pred = [], []
+    with torch.no_grad():
+        for X_b, y_b in loader:
+            X_b, y_b = X_b.to(device), y_b.to(device)
+            logits = model.engine2_classifier(X_b) if hasattr(model, 'engine2_classifier') else model(X_b)
+            loss = criterion(logits, y_b)
+            total_loss += loss.item() * X_b.size(0)
+            total += X_b.size(0)
+            y_true.extend(y_b.cpu().numpy())
+            y_pred.extend(logits.argmax(dim=1).cpu().numpy())
+    val_loss = total_loss / total if total else 0.0
+    val_acc = float(np.mean(np.asarray(y_true) == np.asarray(y_pred))) if total else 0.0
+    val_f1 = f1_score(y_true, y_pred, average='macro', zero_division=0) if total else 0.0
+    return val_loss, val_acc, val_f1
+
+
 # =====================================================================
 # PLOTTING AND ARTIFACT EXPORT HELPERS
 # =====================================================================
@@ -55,7 +119,7 @@ def plot_learning_curves(history, save_path):
 
     # Loss Curve
     ax1.plot(epochs, history["train_loss"], 'b-', lw=1.8, label='Train Loss')
-    ax1.plot(epochs, history["val_loss"], 'r--', lw=1.8, label='Val / Test Loss')
+    ax1.plot(epochs, history["val_loss"], 'r--', lw=1.8, label='Validation Loss')
     ax1.set_title('Cross-Entropy Loss vs. Epochs', fontsize=12, pad=10)
     ax1.set_xlabel('Epochs', fontsize=11)
     ax1.set_ylabel('Loss', fontsize=11)
@@ -64,7 +128,9 @@ def plot_learning_curves(history, save_path):
 
     # Accuracy Curve
     ax2.plot(epochs, [a * 100 for a in history["train_acc"]], 'b-', lw=1.8, label='Train Accuracy')
-    ax2.plot(epochs, [a * 100 for a in history["val_acc"]], 'g--', lw=1.8, label='Val / Test Accuracy')
+    ax2.plot(epochs, [a * 100 for a in history["val_acc"]], 'g--', lw=1.8, label='Validation Accuracy')
+    if "val_macro_f1" in history:
+        ax2.plot(epochs, [a * 100 for a in history["val_macro_f1"]], color='darkorange', linestyle=':', lw=1.8, label='Validation Macro-F1')
     ax2.set_title('Classification Accuracy (%) vs. Epochs', fontsize=12, pad=10)
     ax2.set_xlabel('Epochs', fontsize=11)
     ax2.set_ylabel('Accuracy (%)', fontsize=11)
@@ -208,7 +274,8 @@ def run_single_experiment(args, device):
     balance_suffix = f"{args.balancer}_balanced" if args.balance else "raw"
     ds_prefix = args.dataset_name.lower().replace("-", "_")
     hide_suffix = f"_loco_{args.hide_class.lower()}" if args.hide_class else ""
-    exp_name = f"{ds_prefix}_{args.model}{hide_suffix}_{balance_suffix}_{args.epochs}ep"
+    run_tag = f"{args.loss}_lr{args.lr:g}_bs{args.batch_size}_s{args.seed}"
+    exp_name = f"{ds_prefix}_{args.model}{hide_suffix}_{balance_suffix}_{run_tag}_{args.epochs}ep"
     results_dir = os.path.join("results", exp_name)
     os.makedirs(results_dir, exist_ok=True)
 
@@ -231,8 +298,7 @@ def run_single_experiment(args, device):
 
     if args.balance:
         print(f"\n--- STAGE: Balancing via {args.balancer.upper()} (Train Only) ---")
-        balancer = AdaptiveClassBalancer(target_col=args.target_col, random_state=args.seed, preferred_sampler=args.balancer)
-        train_df = balancer.balance_dataset(train_df)
+        train_df = balance_training_data(train_df, args, args.seed)
 
     X_train, X_val, y_train, y_val, preprocessor, _ = prepare_official_split(train_df, val_df, target_col=args.target_col, hide_class=None)
     X_test, y_test = preprocessor.transform(test_df)
@@ -241,27 +307,30 @@ def run_single_experiment(args, device):
     class_names = [str(c) for c in preprocessor.target_encoder.classes_]
     num_classes = len(class_names)
     
-    normal_idx = 0
+    normal_idx = None
     for idx, c in enumerate(class_names):
         if c.lower() in ['normal', 'benign', 'benigntraffic']:
             normal_idx = idx
             break
+    if normal_idx is None:
+        raise ValueError(f"Could not identify a benign/normal class in {class_names}.")
 
     train_loader = DataLoader(TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.long)), batch_size=args.batch_size, shuffle=True)
     val_loader = DataLoader(TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.long)), batch_size=args.batch_size, shuffle=False)
     test_loader = DataLoader(TensorDataset(torch.tensor(X_test, dtype=torch.float32), torch.tensor(y_test, dtype=torch.long)), batch_size=args.batch_size, shuffle=False)
 
     model = get_model(args.model, input_features=num_features, num_classes=num_classes).to(device)
-    criterion_cls = nn.CrossEntropyLoss(label_smoothing=0.05)
+    criterion_cls = make_classifier_loss(args, y_train, num_classes, device)
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, min_lr=1e-6)
 
     if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
         pretrain_engine1(model, X_train, y_train, normal_idx, device, batch_size=args.batch_size, lr=args.lr, epochs=10)
 
-    history = {"epoch": [], "train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
-    best_val_acc = -1.0
+    history = {"epoch": [], "train_loss": [], "train_acc": [], "val_loss": [], "val_acc": [], "val_macro_f1": []}
+    best_val_f1 = -1.0
     best_model_state = None
+    stale_epochs = 0
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -283,33 +352,30 @@ def run_single_experiment(args, device):
         epoch_train_acc = correct / total if total > 0 else 0.0
         epoch_train_loss = running_loss / total if total > 0 else 0.0
 
-        model.eval()
-        v_loss, v_correct, v_total = 0.0, 0, 0
-        with torch.no_grad():
-            for X_v, y_v in val_loader:
-                X_v, y_v = X_v.to(device), y_v.to(device)
-                v_logits = model.engine2_classifier(X_v) if hasattr(model, 'engine2_classifier') else model(X_v)
-                loss = criterion_cls(v_logits, y_v)
-                v_loss += loss.item() * X_v.size(0)
-                _, p = torch.max(v_logits, 1)
-                v_total += y_v.size(0)
-                v_correct += (p == y_v).sum().item()
-
-        epoch_val_acc = v_correct / v_total if v_total > 0 else 0.0
-        epoch_val_loss = v_loss / v_total if v_total > 0 else 0.0
+        epoch_val_loss, epoch_val_acc, epoch_val_f1 = evaluate_classifier(
+            model, val_loader, criterion_cls, device
+        )
+        scheduler.step(epoch_val_loss)
 
         history["epoch"].append(epoch)
         history["train_loss"].append(epoch_train_loss)
         history["train_acc"].append(epoch_train_acc)
         history["val_loss"].append(epoch_val_loss)
         history["val_acc"].append(epoch_val_acc)
+        history["val_macro_f1"].append(epoch_val_f1)
 
-        if epoch_val_acc > best_val_acc:
-            best_val_acc = epoch_val_acc
+        if epoch_val_f1 > best_val_f1 + args.min_delta:
+            best_val_f1 = epoch_val_f1
             best_model_state = copy.deepcopy(model.state_dict())
+            stale_epochs = 0
+        else:
+            stale_epochs += 1
 
         if epoch % max(1, args.epochs // 10) == 0 or epoch == args.epochs:
-            print(f"Epoch [{epoch}/{args.epochs}] | Train Acc: {epoch_train_acc*100:.2f}% | Val Acc: {epoch_val_acc*100:.2f}%")
+            print(f"Epoch [{epoch}/{args.epochs}] | Train Acc: {epoch_train_acc*100:.2f}% | Val Acc: {epoch_val_acc*100:.2f}% | Val Macro-F1: {epoch_val_f1*100:.2f}%")
+        if stale_epochs >= args.patience:
+            print(f"Early stopping at epoch {epoch}; validation macro-F1 did not improve for {args.patience} epochs.")
+            break
 
     if best_model_state is not None:
         model.load_state_dict(best_model_state)
@@ -342,7 +408,7 @@ def run_single_experiment(args, device):
 
     metrics = compute_metrics(y_trues, y_preds, normal_idx=normal_idx, num_classes=num_classes)
     metrics['final_train_accuracy'] = history["train_acc"][-1]
-    metrics['best_val_accuracy'] = best_val_acc
+    metrics['best_val_macro_f1'] = best_val_f1
     metrics['test_accuracy'] = metrics['accuracy']
     metrics['inference_latency_ms'] = latency_ms
     metrics['throughput_pps'] = throughput
@@ -385,7 +451,8 @@ def run_kfold_experiment(args, device):
     balance_suffix = f"{args.balancer}_balanced" if args.balance else "raw"
     ds_prefix = args.dataset_name.lower().replace("-", "_")
     hide_suffix = f"_loco_{args.hide_class.lower()}" if args.hide_class else ""
-    exp_dir_name = f"{ds_prefix}_{args.model}{hide_suffix}_{balance_suffix}_{args.kfold}fold_{args.epochs}ep"
+    run_tag = f"{args.loss}_lr{args.lr:g}_bs{args.batch_size}_s{args.seed}"
+    exp_dir_name = f"{ds_prefix}_{args.model}{hide_suffix}_{balance_suffix}_{run_tag}_{args.kfold}fold_{args.epochs}ep"
     results_dir = os.path.join("results", exp_dir_name)
     os.makedirs(results_dir, exist_ok=True)
 
@@ -417,8 +484,7 @@ def run_kfold_experiment(args, device):
 
         if args.balance:
             print(f"  [*] Applying {args.balancer.upper()} Balancing on Training Fold...")
-            balancer = AdaptiveClassBalancer(target_col=args.target_col, random_state=args.seed, preferred_sampler=args.balancer)
-            train_df = balancer.balance_dataset(train_df)
+            train_df = balance_training_data(train_df, args, args.seed + fold)
 
         X_train, X_val, y_train, y_val, preprocessor, _ = prepare_official_split(train_df, val_df, target_col=args.target_col, hide_class=None)
 
@@ -426,26 +492,29 @@ def run_kfold_experiment(args, device):
         class_names = [str(c) for c in preprocessor.target_encoder.classes_]
         num_classes = len(class_names)
         
-        normal_idx = 0
+        normal_idx = None
         for idx, c in enumerate(class_names):
             if c.lower() in ['normal', 'benign', 'benigntraffic']:
                 normal_idx = idx
                 break
+        if normal_idx is None:
+            raise ValueError(f"Could not identify a benign/normal class in {class_names}.")
 
         train_loader = DataLoader(TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.long)), batch_size=args.batch_size, shuffle=True)
         val_loader = DataLoader(TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.long)), batch_size=args.batch_size, shuffle=False)
 
         model = get_model(args.model, input_features=num_features, num_classes=num_classes).to(device)
-        criterion_cls = nn.CrossEntropyLoss(label_smoothing=0.05)
+        criterion_cls = make_classifier_loss(args, y_train, num_classes, device)
         optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-5)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, min_lr=1e-6)
 
         if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
             pretrain_engine1(model, X_train, y_train, normal_idx, device, batch_size=args.batch_size, lr=args.lr, epochs=5)
 
-        history = {"epoch": [], "train_loss": [], "train_acc": [], "val_loss": [], "val_acc": []}
-        best_val_acc = -1.0
+        history = {"epoch": [], "train_loss": [], "train_acc": [], "val_loss": [], "val_acc": [], "val_macro_f1": []}
+        best_val_f1 = -1.0
         best_model_state = None
+        stale_epochs = 0
 
         for epoch in range(1, args.epochs + 1):
             model.train()
@@ -467,34 +536,30 @@ def run_kfold_experiment(args, device):
             epoch_train_loss = running_loss / total if total > 0 else 0.0
             epoch_train_acc = correct / total if total > 0 else 0.0
 
-            # Evaluate Fold Validation Split
-            model.eval()
-            v_loss, v_correct, v_total = 0.0, 0, 0
-            with torch.no_grad():
-                for X_v, y_v in val_loader:
-                    X_v, y_v = X_v.to(device), y_v.to(device)
-                    v_logits = model.engine2_classifier(X_v) if hasattr(model, 'engine2_classifier') else model(X_v)
-                    loss = criterion_cls(v_logits, y_v)
-                    v_loss += loss.item() * X_v.size(0)
-                    _, p = torch.max(v_logits, 1)
-                    v_total += y_v.size(0)
-                    v_correct += (p == y_v).sum().item()
-
-            epoch_val_loss = v_loss / v_total if v_total > 0 else 0.0
-            epoch_val_acc = v_correct / v_total if v_total > 0 else 0.0
+            epoch_val_loss, epoch_val_acc, epoch_val_f1 = evaluate_classifier(
+                model, val_loader, criterion_cls, device
+            )
+            scheduler.step(epoch_val_loss)
 
             history["epoch"].append(epoch)
             history["train_loss"].append(epoch_train_loss)
             history["train_acc"].append(epoch_train_acc)
             history["val_loss"].append(epoch_val_loss)
             history["val_acc"].append(epoch_val_acc)
+            history["val_macro_f1"].append(epoch_val_f1)
 
-            if epoch_val_acc > best_val_acc:
-                best_val_acc = epoch_val_acc
+            if epoch_val_f1 > best_val_f1 + args.min_delta:
+                best_val_f1 = epoch_val_f1
                 best_model_state = copy.deepcopy(model.state_dict())
+                stale_epochs = 0
+            else:
+                stale_epochs += 1
 
             if epoch % max(1, args.epochs // 5) == 0 or epoch == args.epochs:
-                print(f"  Epoch [{epoch}/{args.epochs}] | Train Acc: {epoch_train_acc*100:.2f}% | Val Acc: {epoch_val_acc*100:.2f}%")
+                print(f"  Epoch [{epoch}/{args.epochs}] | Train Acc: {epoch_train_acc*100:.2f}% | Val Acc: {epoch_val_acc*100:.2f}% | Val Macro-F1: {epoch_val_f1*100:.2f}%")
+            if stale_epochs >= args.patience:
+                print(f"  Early stopping at epoch {epoch}; validation macro-F1 did not improve for {args.patience} epochs.")
+                break
 
         if best_model_state is not None:
             model.load_state_dict(best_model_state)
@@ -522,7 +587,7 @@ def run_kfold_experiment(args, device):
         metrics = compute_metrics(y_trues, y_preds, normal_idx=normal_idx, num_classes=num_classes)
         metrics['fold'] = fold
         metrics['final_train_accuracy'] = float(history["train_acc"][-1])
-        metrics['best_test_val_accuracy'] = float(best_val_acc)
+        metrics['best_val_macro_f1'] = float(best_val_f1)
         metrics['final_test_val_accuracy'] = float(metrics['accuracy'])
 
         # LOCO Evaluation
@@ -607,9 +672,15 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=0.001)
+    parser.add_argument('--patience', type=int, default=12, help='Early stopping patience on validation macro-F1')
+    parser.add_argument('--min_delta', type=float, default=0.001, help='Minimum macro-F1 gain to reset early stopping')
+    parser.add_argument('--loss', choices=['cross_entropy', 'weighted', 'focal'], default='cross_entropy')
+    parser.add_argument('--label_smoothing', type=float, default=0.05)
+    parser.add_argument('--focal_gamma', type=float, default=2.0)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--balance', action='store_true', help='Enable minority class balancing')
-    parser.add_argument('--balancer', type=str, default='adasyn', choices=['adasyn', 'smotenc', 'random', 'auto'])
+    parser.add_argument('--balancer', type=str, default='adasyn', choices=['adasyn', 'smotenc', 'random', 'auto', 'ctgan'])
+    parser.add_argument('--ctgan_epochs', type=int, default=10)
     parser.add_argument('--hide_class', type=str, default=None, help='Class to hide for zero-day LOCO test')
     parser.add_argument('--kfold', type=int, default=0, help='Set > 1 (e.g., 5) for K-Fold CV; 0 for 3-way split')
     args = parser.parse_args()
