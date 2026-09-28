@@ -338,7 +338,6 @@ def run_single_experiment(args, device):
 
     for epoch in range(1, args.epochs + 1):
         model.train()
-        running_loss, correct, total = 0.0, 0, 0
         for X_b, y_b in train_loader:
             X_b, y_b = X_b.to(device), y_b.to(device)
             optimizer.zero_grad()
@@ -347,13 +346,11 @@ def run_single_experiment(args, device):
             loss.backward()
             optimizer.step()
 
-            running_loss += loss.item() * X_b.size(0)
-            _, preds = torch.max(logits, 1)
-            total += y_b.size(0)
-            correct += (preds == y_b).sum().item()
-
-        epoch_train_acc = correct / total if total > 0 else 0.0
-        epoch_train_loss = running_loss / total if total > 0 else 0.0
+        # Measure train and validation curves in eval mode so BatchNorm/dropout
+        # behavior is comparable across train, validation, and test datasets.
+        epoch_train_loss, epoch_train_acc, _ = evaluate_classifier(
+            model, train_loader, criterion_cls, device
+        )
 
         epoch_val_loss, epoch_val_acc, epoch_val_f1 = evaluate_classifier(
             model, val_loader, criterion_cls, device
@@ -535,7 +532,6 @@ def run_kfold_experiment(args, device):
 
         for epoch in range(1, args.epochs + 1):
             model.train()
-            running_loss, correct, total = 0.0, 0, 0
             for X_b, y_b in train_loader:
                 X_b, y_b = X_b.to(device), y_b.to(device)
                 optimizer.zero_grad()
@@ -544,13 +540,9 @@ def run_kfold_experiment(args, device):
                 loss.backward()
                 optimizer.step()
 
-                running_loss += loss.item() * X_b.size(0)
-                _, preds = torch.max(logits, 1)
-                total += y_b.size(0)
-                correct += (preds == y_b).sum().item()
-
-            epoch_train_loss = running_loss / total if total > 0 else 0.0
-            epoch_train_acc = correct / total if total > 0 else 0.0
+            epoch_train_loss, epoch_train_acc, _ = evaluate_classifier(
+                model, train_loader, criterion_cls, device
+            )
 
             epoch_val_loss, epoch_val_acc, epoch_val_f1 = evaluate_classifier(
                 model, val_loader, criterion_cls, device
