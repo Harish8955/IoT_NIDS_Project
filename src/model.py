@@ -138,6 +138,7 @@ class IoT_NIDS_Net(nn.Module):
         x = self.resblock(x)
         
         x = x.transpose(1, 2)
+        self.bigru.flatten_parameters()
         gru_out, _ = self.bigru(x)
         
         context_vector = torch.mean(gru_out, dim=1)
