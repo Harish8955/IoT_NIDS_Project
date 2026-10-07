@@ -167,45 +167,52 @@ def evaluate_classifier(model, loader, criterion, device):
 # =====================================================================
 def plot_learning_curves(history, save_path):
     epochs = history["epoch"]
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(19, 5))
 
-    # Loss Curve
-    ax1.plot(epochs, history["train_loss"], 'b-', lw=1.8, label='Train Loss')
-    ax1.plot(epochs, history["val_loss"], color='crimson', alpha=0.25, lw=1.0, label='Validation Loss (raw)')
-    ax1.plot(epochs, moving_average(history["val_loss"]), 'r--', lw=1.8, label='Validation Loss (3-epoch mean)')
+    ax1.plot(epochs, history["train_loss"], 'b-', lw=1.8, label='Train')
+    ax1.plot(epochs, history["val_loss"], color='crimson', alpha=0.22, lw=1.0, label='Validation raw')
+    ax1.plot(epochs, moving_average(history["val_loss"]), 'r--', lw=1.8, label='Validation 3-epoch mean')
     if "test_loss" in history:
-        ax1.plot(epochs, history["test_loss"], color='darkorange', alpha=0.25, lw=1.0, label='Test Loss (raw)')
-        ax1.plot(epochs, moving_average(history["test_loss"]), color='darkorange', lw=1.8, label='Test Loss (3-epoch mean)')
-    ax1.set_title('Cross-Entropy Loss vs. Epochs', fontsize=12, pad=10)
-    ax1.set_xlabel('Epochs', fontsize=11)
-    ax1.set_ylabel('Loss', fontsize=11)
-    ax1.grid(True, linestyle='--', alpha=0.5)
-    ax1.legend(fontsize=10)
+        ax1.plot(epochs, history["test_loss"], color='darkorange', alpha=0.22, lw=1.0, label='Test raw')
+        ax1.plot(epochs, moving_average(history["test_loss"]), color='darkorange', lw=1.8, label='Test 3-epoch mean')
+    ax1.set_title('Loss', fontsize=12, pad=10)
+    ax1.set_xlabel('Epoch')
+    ax1.set_ylabel('Loss')
+    ax1.grid(True, linestyle='--', alpha=0.4)
+    ax1.legend(fontsize=8)
 
-    # Accuracy Curve
     ax2.plot(epochs, [a * 100 for a in history["train_acc"]], 'b-', lw=1.8, label='Train Accuracy')
-    ax2.plot(epochs, [a * 100 for a in history["val_acc"]], color='green', alpha=0.25, lw=1.0, label='Validation Accuracy (raw)')
-    ax2.plot(epochs, [a * 100 for a in moving_average(history["val_acc"])], 'g--', lw=1.8, label='Validation Accuracy (3-epoch mean)')
+    ax2.plot(epochs, [a * 100 for a in history["val_acc"]], color='green', alpha=0.22, lw=1.0, label='Validation raw')
+    ax2.plot(epochs, [a * 100 for a in moving_average(history["val_acc"])], 'g--', lw=1.8, label='Validation 3-epoch mean')
     if "test_acc" in history:
-        ax2.plot(epochs, [a * 100 for a in history["test_acc"]], color='darkorange', alpha=0.25, lw=1.0, label='Test Accuracy (raw)')
-        ax2.plot(epochs, [a * 100 for a in moving_average(history["test_acc"])], color='darkorange', lw=1.8, label='Test Accuracy (3-epoch mean)')
-    if "val_macro_f1_smoothed" in history:
-        ax2.plot(epochs, [a * 100 for a in history["val_macro_f1_smoothed"]], color='purple', linestyle='-.', lw=1.5, label='Validation Macro-F1 (smoothed)')
-    if "val_macro_f1" in history:
-        ax2.plot(epochs, [a * 100 for a in history["val_macro_f1"]], color='darkorange', linestyle=':', lw=1.8, label='Validation Macro-F1')
-    ax2.set_title('Classification Accuracy (%) vs. Epochs', fontsize=12, pad=10)
-    ax2.set_xlabel('Epochs', fontsize=11)
-    ax2.set_ylabel('Accuracy (%)', fontsize=11)
-    ax2.grid(True, linestyle='--', alpha=0.5)
-    ax2.legend(fontsize=10)
+        ax2.plot(epochs, [a * 100 for a in history["test_acc"]], color='darkorange', alpha=0.22, lw=1.0, label='Test raw')
+        ax2.plot(epochs, [a * 100 for a in moving_average(history["test_acc"])], color='darkorange', lw=1.8, label='Test 3-epoch mean')
+    ax2.set_title('Accuracy', fontsize=12, pad=10)
+    ax2.set_xlabel('Epoch')
+    ax2.set_ylabel('Accuracy (%)')
+    ax2.set_ylim(0, 100)
+    ax2.grid(True, linestyle='--', alpha=0.4)
+    ax2.legend(fontsize=8)
 
-    plt.tight_layout()
+    if "val_macro_f1" in history:
+        ax3.plot(epochs, [a * 100 for a in history["val_macro_f1"]], color='purple', alpha=0.22, lw=1.0, label='Validation raw')
+        smooth_f1 = history.get("val_macro_f1_smoothed", moving_average(history["val_macro_f1"]))
+        ax3.plot(epochs, [a * 100 for a in smooth_f1], color='purple', lw=1.8, label='Validation smoothed')
+    ax3.set_title('Validation Macro-F1', fontsize=12, pad=10)
+    ax3.set_xlabel('Epoch')
+    ax3.set_ylabel('Macro-F1 (%)')
+    ax3.set_ylim(0, 100)
+    ax3.grid(True, linestyle='--', alpha=0.4)
+    ax3.legend(fontsize=8)
+
+    fig.suptitle('Training, Validation, and Test Curves', fontsize=14, y=1.02)
+    fig.tight_layout()
     plt.savefig(save_path, dpi=300)
     plt.close()
 
 
 def plot_confusion_matrix(y_true, y_pred, class_names, save_path):
-    cm = confusion_matrix(y_true, y_pred)
+    cm = confusion_matrix(y_true, y_pred, labels=list(range(len(class_names))))
     cm_norm = cm.astype('float') / (cm.sum(axis=1)[:, np.newaxis] + 1e-9)
 
     plt.figure(figsize=(max(9, len(class_names) * 0.45), max(7, len(class_names) * 0.35)))
@@ -218,7 +225,7 @@ def plot_confusion_matrix(y_true, y_pred, class_names, save_path):
         yticklabels=class_names,
         cbar=True
     )
-    plt.title("Normalized Confusion Matrix", fontsize=13, pad=12)
+    plt.title("Normalized Confusion Matrix (Test Set)", fontsize=13, pad=12)
     plt.ylabel("True Label", fontsize=11)
     plt.xlabel("Predicted Label", fontsize=11)
     plt.xticks(rotation=45, ha='right', fontsize=8)
@@ -506,11 +513,14 @@ def run_single_experiment(args, device):
     with open(os.path.join(results_dir, "preprocessor.pkl"), "wb") as f:
         pickle.dump(preprocessor, f)
 
-    plot_learning_curves(history, os.path.join(results_dir, "learning_curve.png"))
+    plot_learning_curves(history, os.path.join(results_dir, "training_curves.png"))
     plot_confusion_matrix(y_trues, y_preds, class_names, os.path.join(results_dir, "confusion_matrix.png"))
     plot_roc_curves(y_trues, y_probs, class_names, os.path.join(results_dir, "roc_curves.png"))
 
-    rep_df = pd.DataFrame(classification_report(y_trues, y_preds, target_names=class_names, output_dict=True, zero_division=0)).transpose()
+    rep_df = pd.DataFrame(classification_report(
+        y_trues, y_preds, labels=list(range(num_classes)), target_names=class_names,
+        output_dict=True, zero_division=0
+    )).transpose()
     rep_df.to_csv(os.path.join(results_dir, "classification_report.csv"))
 
     if zero_day_df is not None and len(zero_day_df) > 0:
@@ -727,11 +737,17 @@ def run_kfold_experiment(args, device):
         with open(os.path.join(fold_dir, "history.json"), "w") as f:
             json.dump(history, f, indent=4)
 
-        plot_learning_curves(history, os.path.join(fold_dir, "learning_curve.png"))
+        with open(os.path.join(fold_dir, "metrics.json"), "w") as f:
+            json.dump(metrics, f, indent=4)
+
+        plot_learning_curves(history, os.path.join(fold_dir, "training_curves.png"))
         plot_confusion_matrix(y_trues, y_preds, class_names, os.path.join(fold_dir, "confusion_matrix.png"))
         plot_roc_curves(y_trues, y_probs, class_names, os.path.join(fold_dir, "roc_curves.png"))
 
-        rep_df = pd.DataFrame(classification_report(y_trues, y_preds, target_names=class_names, output_dict=True, zero_division=0)).transpose()
+        rep_df = pd.DataFrame(classification_report(
+            y_trues, y_preds, labels=list(range(num_classes)), target_names=class_names,
+            output_dict=True, zero_division=0
+        )).transpose()
         rep_df.to_csv(os.path.join(fold_dir, "classification_report.csv"))
 
         print(f"  [Fold {fold} Saved] Train Acc: {metrics['final_train_accuracy']*100:.2f}% | Test Acc: {metrics['accuracy']*100:.2f}% | DR: {metrics['detection_rate']*100:.2f}% | FAR: {metrics['false_alarm_rate']*100:.2f}%")
@@ -762,6 +778,8 @@ def run_kfold_experiment(args, device):
         summary["std_zero_day_isolation_acc"] = float(np.std(zd_accs))
 
     with open(os.path.join(results_dir, "kfold_summary.json"), "w") as f:
+        json.dump(summary, f, indent=4)
+    with open(os.path.join(results_dir, "metrics.json"), "w") as f:
         json.dump(summary, f, indent=4)
 
     print("\n=======================================================")
