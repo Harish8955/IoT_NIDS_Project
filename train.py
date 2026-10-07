@@ -423,8 +423,8 @@ def run_single_experiment(args, device):
             optimizer.step()
             ema.update(model)
 
-        # Measure train and validation curves in eval mode so BatchNorm/dropout
-        # behavior is comparable across train, validation, and test datasets.
+        # Evaluate with dropout disabled and consistent inference behavior for
+        # train, validation, and test curve measurements.
         epoch_train_loss, epoch_train_acc, _ = evaluate_classifier(
             ema.module, train_eval_loader, criterion_cls, device
         )

@@ -319,9 +319,9 @@ def create_full_project_pdf(filename="IoT_NIDS_Complete_Technical_Report.pdf"):
         S['body']))
 
     ae_arch_text = (
-        "Architecture: Input(N) -> Linear(N, 64) -> BatchNorm1d(64) -> ReLU -><br/>"
+        "Architecture: Input(N) -> Linear(N, 64) -> LayerNorm(64) -> ReLU -><br/>"
         "                          Linear(64, 32) -> ReLU  [Bottleneck / Latent Code]<br/>"
-        "                       -> Linear(32, 64) -> BatchNorm1d(64) -> ReLU -><br/>"
+        "                       -> Linear(32, 64) -> LayerNorm(64) -> ReLU -><br/>"
         "                          Linear(64, N) -> Sigmoid()  [Reconstruction Output]<br/><br/>"
         "Loss Function: L_recon(x) = (1/N) * sum_i (x_i - x_hat_i)^2   [Per-Sample MSE]"
     )
@@ -338,7 +338,7 @@ def create_full_project_pdf(filename="IoT_NIDS_Complete_Technical_Report.pdf"):
         "confidence-gating mechanism. It combines three complementary deep learning components:",
         S['body']))
     for b in [
-        "<b>1D Convolutional Feature Extractor:</b> Three stacked Conv1d layers (1->32->64->128 channels) with BatchNorm and ReLU extract hierarchical spatial feature patterns from the input feature sequence.",
+        "<b>1D Convolutional Feature Extractor:</b> Three stacked Conv1d layers (1->32->64->128 channels) with channel-wise LayerNorm and ReLU extract hierarchical spatial feature patterns from the input feature sequence.",
         "<b>1D ResNeSt Split-Attention Block:</b> A residual convolutional unit with grouped convolutions (groups=2) and learnable split-attention weights that adaptively re-weight feature channels based on global average pooled context. This captures fine-grained feature correlations without adding many parameters.",
         "<b>Bidirectional GRU (BiGRU):</b> After transposing the feature map to a sequence (batch, time, channels), a BiGRU (hidden_size=64, bidirectional=True) captures bidirectional temporal dependencies in the feature sequence. Final context vector = mean-pooled GRU output.",
         "<b>Classification Head:</b> Dropout(0.5) followed by Linear(128, K) where K = number of attack classes (dynamically set at runtime).",

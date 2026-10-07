@@ -2,6 +2,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
+class ChannelLayerNorm1D(nn.Module):
+    """Apply LayerNorm over channels for channel-first Conv1d activations."""
+    def __init__(self, channels):
+        super().__init__()
+        self.norm = nn.LayerNorm(channels)
+
+    def forward(self, x):
+        if x.dim() != 3:
+            raise ValueError(f"ChannelLayerNorm1D expects (batch, channels, length), got {tuple(x.shape)}")
+        return self.norm(x.transpose(1, 2)).transpose(1, 2).contiguous()
+
 # =====================================================================
 # 1. SPLIT-ATTENTION & RESNEST 1D (TRUE RADIX FEATURE BRANCHES)
 # =====================================================================
@@ -20,7 +32,7 @@ class SplitAttention1D(nn.Module):
         inter_channels = max(16, (channels * radix) // reduction_factor)
         
         self.fc1 = nn.Linear(channels, inter_channels, bias=False)
-        self.bn1 = nn.BatchNorm1d(inter_channels)
+        self.ln1 = nn.LayerNorm(inter_channels)
         self.relu = nn.ReLU(inplace=True)
         self.fc2 = nn.Linear(inter_channels, channels * radix)
 
@@ -38,7 +50,7 @@ class SplitAttention1D(nn.Module):
         
         # Dense channel attention
         att = self.fc1(gap)
-        att = self.bn1(att)
+        att = self.ln1(att)
         att = self.relu(att)
         att = self.fc2(att)
         
@@ -66,30 +78,30 @@ class ResNeStBlock1D(nn.Module):
         mid_channels = out_channels * radix
         
         self.conv1 = nn.Conv1d(in_channels, mid_channels, kernel_size=1, bias=False)
-        self.bn1 = nn.BatchNorm1d(mid_channels)
+        self.ln1 = ChannelLayerNorm1D(mid_channels)
         
         self.conv2 = nn.Conv1d(mid_channels, mid_channels, kernel_size=3, padding=1, groups=groups * radix, bias=False)
-        self.bn2 = nn.BatchNorm1d(mid_channels)
+        self.ln2 = ChannelLayerNorm1D(mid_channels)
         
         self.split_attention = SplitAttention1D(in_channels=mid_channels, channels=out_channels, radix=radix)
         
         self.conv3 = nn.Conv1d(out_channels, out_channels, kernel_size=1, bias=False)
-        self.bn3 = nn.BatchNorm1d(out_channels)
+        self.ln3 = ChannelLayerNorm1D(out_channels)
         
         self.shortcut = nn.Sequential()
         if in_channels != out_channels:
             self.shortcut = nn.Sequential(
                 nn.Conv1d(in_channels, out_channels, kernel_size=1, bias=False),
-                nn.BatchNorm1d(out_channels)
+                ChannelLayerNorm1D(out_channels)
             )
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
         residual = self.shortcut(x)
-        out = self.relu(self.bn1(self.conv1(x)))
-        out = self.bn2(self.conv2(out))
+        out = self.relu(self.ln1(self.conv1(x)))
+        out = self.ln2(self.conv2(out))
         out = self.split_attention(out)
-        out = self.bn3(self.conv3(out))
+        out = self.ln3(self.conv3(out))
         out += residual
         return self.relu(out)
 
@@ -103,15 +115,15 @@ class IoT_NIDS_Net(nn.Module):
         
         self.spatial_extractor = nn.Sequential(
             nn.Conv1d(1, 32, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm1d(32),
+            ChannelLayerNorm1D(32),
             nn.ReLU(inplace=True),
             
             nn.Conv1d(32, 64, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm1d(64),
+            ChannelLayerNorm1D(64),
             nn.ReLU(inplace=True),
             
             nn.Conv1d(64, 128, kernel_size=3, padding=1, bias=False),
-            nn.BatchNorm1d(128),
+            ChannelLayerNorm1D(128),
             nn.ReLU(inplace=True),
             
             nn.MaxPool1d(kernel_size=2, ceil_mode=True)
@@ -232,26 +244,26 @@ class Engine1_ZeroDayAutoencoder(nn.Module):
         super(Engine1_ZeroDayAutoencoder, self).__init__()
         self.encoder = nn.Sequential(
             nn.Linear(input_features, 64),
-            nn.BatchNorm1d(64),
+            nn.LayerNorm(64),
             nn.ReLU(),
             nn.Linear(64, 32),
-            nn.BatchNorm1d(32),
+            nn.LayerNorm(32),
             nn.ReLU(),
             nn.Linear(32, 16),
-            nn.BatchNorm1d(16),
+            nn.LayerNorm(16),
             nn.ReLU(),
             nn.Linear(16, latent_dim),
             nn.ReLU()
         )
         self.decoder = nn.Sequential(
             nn.Linear(latent_dim, 16),
-            nn.BatchNorm1d(16),
+            nn.LayerNorm(16),
             nn.ReLU(),
             nn.Linear(16, 32),
-            nn.BatchNorm1d(32),
+            nn.LayerNorm(32),
             nn.ReLU(),
             nn.Linear(32, 64),
-            nn.BatchNorm1d(64),
+            nn.LayerNorm(64),
             nn.ReLU(),
             nn.Linear(64, input_features)
         )
