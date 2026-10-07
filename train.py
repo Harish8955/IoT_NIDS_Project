@@ -28,7 +28,7 @@ for p in [BASE_DIR, SRC_DIR]:
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from preprocessing import prepare_official_split
+from preprocessing import TrafficDataPreprocessor
 from adasyn_balancer import AdaptiveClassBalancer
 from ctgan_balancer import CTGANBalancer
 from model import get_model
@@ -47,6 +47,14 @@ def set_seed(seed=42):
     torch.backends.cudnn.benchmark = False
 
 
+def clean_target_rows(df, target_col):
+    if target_col not in df.columns:
+        raise ValueError(f"Target column '{target_col}' is missing from the dataset.")
+    labels = df[target_col].astype('string').str.strip()
+    invalid = labels.str.lower().isin(['nan', 'none', 'label']) | df[target_col].isna()
+    return df.loc[~invalid].copy()
+
+
 class FocalLoss(nn.Module):
     def __init__(self, class_weights=None, gamma=2.0):
         super().__init__()
@@ -60,6 +68,30 @@ class FocalLoss(nn.Module):
         if self.class_weights is not None:
             loss = loss * self.class_weights[targets]
         return loss.mean()
+
+
+class ModelEMA:
+    """Exponential moving average copy used for validation and best checkpoints."""
+    def __init__(self, model, decay=0.99):
+        self.module = copy.deepcopy(model).eval()
+        self.decay = decay
+        for parameter in self.module.parameters():
+            parameter.requires_grad_(False)
+
+    @torch.no_grad()
+    def update(self, model):
+        source_state = model.state_dict()
+        for name, ema_value in self.module.state_dict().items():
+            source_value = source_state[name].detach()
+            if torch.is_floating_point(ema_value):
+                ema_value.mul_(self.decay).add_(source_value, alpha=1.0 - self.decay)
+            else:
+                ema_value.copy_(source_value)
+
+
+def moving_average(values, window=3):
+    values = list(values)
+    return [float(np.mean(values[max(0, i - window + 1):i + 1])) for i in range(len(values))]
 
 
 def make_classifier_loss(args, y_train, num_classes, device):
@@ -80,15 +112,35 @@ def make_classifier_loss(args, y_train, num_classes, device):
     )
 
 
-def balance_training_data(train_df, args, seed):
-    if not args.balance:
-        return train_df
-    if args.balancer == 'ctgan':
-        return CTGANBalancer(target_col=args.target_col, epochs=args.ctgan_epochs).balance_dataset(train_df)
-    balancer = AdaptiveClassBalancer(
-        target_col=args.target_col, random_state=seed, preferred_sampler=args.balancer
-    )
-    return balancer.balance_dataset(train_df)
+def prepare_training_arrays(train_df, val_df, args, seed, test_df=None):
+    """Fit preprocessing on original train rows; resample only encoded train rows."""
+    preprocessor = TrafficDataPreprocessor(target_col=args.target_col)
+    X_train, y_train, _ = preprocessor.fit_transform(train_df)
+    X_val, y_val = preprocessor.transform(val_df)
+    X_test = y_test = None
+    if test_df is not None:
+        X_test, y_test = preprocessor.transform(test_df)
+
+    if args.balance:
+        if args.balancer == 'ctgan':
+            # CTGAN sees training rows only. Its samples use the original-train
+            # encoder/scaler so validation/test never influence preprocessing.
+            balanced_raw = CTGANBalancer(
+                target_col=args.target_col, epochs=args.ctgan_epochs
+            ).balance_dataset(train_df)
+            X_train, y_train = preprocessor.transform(balanced_raw)
+        else:
+            train_matrix = pd.DataFrame(X_train)
+            train_matrix['__target__'] = np.asarray(y_train, dtype=np.int64)
+            sampler = AdaptiveClassBalancer(
+                target_col='__target__', max_minority_ratio=args.adasyn_ratio,
+                random_state=seed, preferred_sampler=args.balancer
+            )
+            balanced = sampler.balance_dataset(train_matrix)
+            X_train = balanced.drop(columns=['__target__']).to_numpy(dtype=np.float32)
+            y_train = balanced['__target__'].to_numpy(dtype=np.int64)
+
+    return X_train, X_val, y_train, y_val, X_test, y_test, preprocessor
 
 
 def evaluate_classifier(model, loader, criterion, device):
@@ -119,9 +171,11 @@ def plot_learning_curves(history, save_path):
 
     # Loss Curve
     ax1.plot(epochs, history["train_loss"], 'b-', lw=1.8, label='Train Loss')
+    ax1.plot(epochs, history["val_loss"], color='crimson', alpha=0.25, lw=1.0, label='Validation Loss (raw)')
+    ax1.plot(epochs, moving_average(history["val_loss"]), 'r--', lw=1.8, label='Validation Loss (3-epoch mean)')
     if "test_loss" in history:
-        ax1.plot(epochs, history["test_loss"], color='darkorange', linestyle=':', lw=1.8, label='Test Loss')
-    ax1.plot(epochs, history["val_loss"], 'r--', lw=1.8, label='Validation Loss')
+        ax1.plot(epochs, history["test_loss"], color='darkorange', alpha=0.25, lw=1.0, label='Test Loss (raw)')
+        ax1.plot(epochs, moving_average(history["test_loss"]), color='darkorange', lw=1.8, label='Test Loss (3-epoch mean)')
     ax1.set_title('Cross-Entropy Loss vs. Epochs', fontsize=12, pad=10)
     ax1.set_xlabel('Epochs', fontsize=11)
     ax1.set_ylabel('Loss', fontsize=11)
@@ -130,9 +184,13 @@ def plot_learning_curves(history, save_path):
 
     # Accuracy Curve
     ax2.plot(epochs, [a * 100 for a in history["train_acc"]], 'b-', lw=1.8, label='Train Accuracy')
-    ax2.plot(epochs, [a * 100 for a in history["val_acc"]], 'g--', lw=1.8, label='Validation Accuracy')
+    ax2.plot(epochs, [a * 100 for a in history["val_acc"]], color='green', alpha=0.25, lw=1.0, label='Validation Accuracy (raw)')
+    ax2.plot(epochs, [a * 100 for a in moving_average(history["val_acc"])], 'g--', lw=1.8, label='Validation Accuracy (3-epoch mean)')
     if "test_acc" in history:
-        ax2.plot(epochs, [a * 100 for a in history["test_acc"]], color='darkorange', linestyle=':', lw=1.8, label='Test Accuracy')
+        ax2.plot(epochs, [a * 100 for a in history["test_acc"]], color='darkorange', alpha=0.25, lw=1.0, label='Test Accuracy (raw)')
+        ax2.plot(epochs, [a * 100 for a in moving_average(history["test_acc"])], color='darkorange', lw=1.8, label='Test Accuracy (3-epoch mean)')
+    if "val_macro_f1_smoothed" in history:
+        ax2.plot(epochs, [a * 100 for a in history["val_macro_f1_smoothed"]], color='purple', linestyle='-.', lw=1.5, label='Validation Macro-F1 (smoothed)')
     if "val_macro_f1" in history:
         ax2.plot(epochs, [a * 100 for a in history["val_macro_f1"]], color='darkorange', linestyle=':', lw=1.8, label='Validation Macro-F1')
     ax2.set_title('Classification Accuracy (%) vs. Epochs', fontsize=12, pad=10)
@@ -250,7 +308,7 @@ def pretrain_engine1(model, X_train, y_train, normal_idx, device, batch_size=64,
     X_train_benign = X_train[benign_mask]
     benign_loader = DataLoader(
         TensorDataset(torch.tensor(X_train_benign, dtype=torch.float32)),
-        batch_size=batch_size, shuffle=True
+        batch_size=batch_size, shuffle=True, drop_last=len(X_train_benign) >= batch_size
     )
 
     for ae_ep in range(1, epochs + 1):
@@ -262,6 +320,7 @@ def pretrain_engine1(model, X_train, y_train, normal_idx, device, batch_size=64,
             recon, _ = model.engine1_zero_day_guard(x_b)
             loss_ae = criterion_recon(recon, x_b)
             loss_ae.backward()
+            torch.nn.utils.clip_grad_norm_(model.engine1_zero_day_guard.parameters(), 1.0)
             ae_optimizer.step()
             running_loss += loss_ae.item() * x_b.size(0)
         
@@ -278,7 +337,7 @@ def run_single_experiment(args, device):
     balance_suffix = f"{args.balancer}_balanced" if args.balance else "raw"
     ds_prefix = args.dataset_name.lower().replace("-", "_")
     hide_suffix = f"_loco_{args.hide_class.lower()}" if args.hide_class else ""
-    run_tag = f"{args.loss}_lr{args.lr:g}_bs{args.batch_size}_s{args.seed}"
+    run_tag = f"{args.loss}_lr{args.lr:g}_bs{args.batch_size}_ema{args.ema_decay:g}_ar{args.adasyn_ratio:g}_s{args.seed}"
     exp_name = f"{ds_prefix}_{args.model}{hide_suffix}_{balance_suffix}_{run_tag}_{args.epochs}ep"
     results_dir = os.path.join("results", exp_name)
     os.makedirs(results_dir, exist_ok=True)
@@ -287,7 +346,7 @@ def run_single_experiment(args, device):
     print(f"    RUNNING EXPERIMENT: {exp_name.upper()}")
     print("==================================================")
 
-    raw_df = pd.read_csv(args.dataset)
+    raw_df = clean_target_rows(pd.read_csv(args.dataset), args.target_col)
 
     zero_day_df = None
     if args.hide_class:
@@ -295,17 +354,22 @@ def run_single_experiment(args, device):
         raw_df = raw_df[raw_df[args.target_col].astype(str).str.lower() != args.hide_class.lower()].copy()
         print(f"  [*] Zero-Day Class '{args.hide_class}' isolated: {len(zero_day_df)} samples reserved.")
 
+    class_counts = raw_df[args.target_col].astype(str).str.strip().value_counts()
+    if len(class_counts) and class_counts.min() < 7:
+        raise ValueError(
+            "A stratified train/validation/test split needs at least 7 samples per known class; "
+            f"smallest class has {int(class_counts.min())}. Use more data or a two-way split."
+        )
     stratify_col = raw_df[args.target_col] if args.target_col in raw_df else None
     train_df, temp_df = train_test_split(raw_df, test_size=0.30, random_state=args.seed, stratify=stratify_col)
     temp_stratify = temp_df[args.target_col] if args.target_col in temp_df else None
     val_df, test_df = train_test_split(temp_df, test_size=0.50, random_state=args.seed, stratify=temp_stratify)
 
     if args.balance:
-        print(f"\n--- STAGE: Balancing via {args.balancer.upper()} (Train Only) ---")
-        train_df = balance_training_data(train_df, args, args.seed)
-
-    X_train, X_val, y_train, y_val, preprocessor, _ = prepare_official_split(train_df, val_df, target_col=args.target_col, hide_class=None)
-    X_test, y_test = preprocessor.transform(test_df)
+        print(f"\n--- STAGE: Balancing via {args.balancer.upper()} (Training Partition Only) ---")
+    X_train, X_val, y_train, y_val, X_test, y_test, preprocessor = prepare_training_arrays(
+        train_df, val_df, args, args.seed, test_df=test_df
+    )
 
     num_features = X_train.shape[1]
     class_names = [str(c) for c in preprocessor.target_encoder.classes_]
@@ -319,7 +383,9 @@ def run_single_experiment(args, device):
     if normal_idx is None:
         raise ValueError(f"Could not identify a benign/normal class in {class_names}.")
 
-    train_loader = DataLoader(TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.long)), batch_size=args.batch_size, shuffle=True)
+    train_dataset = TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.long))
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=len(train_dataset) >= args.batch_size)
+    train_eval_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False)
     val_loader = DataLoader(TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.long)), batch_size=args.batch_size, shuffle=False)
     test_loader = DataLoader(TensorDataset(torch.tensor(X_test, dtype=torch.float32), torch.tensor(y_test, dtype=torch.long)), batch_size=args.batch_size, shuffle=False)
 
@@ -330,11 +396,13 @@ def run_single_experiment(args, device):
 
     if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
         pretrain_engine1(model, X_train, y_train, normal_idx, device, batch_size=args.batch_size, lr=args.lr, epochs=10)
+    ema = ModelEMA(model, decay=args.ema_decay)
 
-    history = {"epoch": [], "train_loss": [], "train_acc": [], "val_loss": [], "val_acc": [], "val_macro_f1": [], "test_loss": [], "test_acc": []}
+    history = {"epoch": [], "train_loss": [], "train_acc": [], "val_loss": [], "val_acc": [], "val_macro_f1": [], "val_macro_f1_smoothed": [], "test_loss": [], "test_acc": []}
     best_val_f1 = -1.0
     best_model_state = None
     stale_epochs = 0
+    val_f1_window = []
 
     for epoch in range(1, args.epochs + 1):
         model.train()
@@ -344,23 +412,27 @@ def run_single_experiment(args, device):
             logits = model.engine2_classifier(X_b) if hasattr(model, 'engine2_classifier') else model(X_b)
             loss = criterion_cls(logits, y_b)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             optimizer.step()
+            ema.update(model)
 
         # Measure train and validation curves in eval mode so BatchNorm/dropout
         # behavior is comparable across train, validation, and test datasets.
         epoch_train_loss, epoch_train_acc, _ = evaluate_classifier(
-            model, train_loader, criterion_cls, device
+            ema.module, train_eval_loader, criterion_cls, device
         )
 
         epoch_val_loss, epoch_val_acc, epoch_val_f1 = evaluate_classifier(
-            model, val_loader, criterion_cls, device
+            ema.module, val_loader, criterion_cls, device
         )
         scheduler.step(epoch_val_loss)
         # Test curves are recorded for visibility only; test scores never select
         # checkpoints, tune thresholds, or drive the learning-rate scheduler.
         epoch_test_loss, epoch_test_acc, _ = evaluate_classifier(
-            model, test_loader, criterion_cls, device
+            ema.module, test_loader, criterion_cls, device
         )
+        val_f1_window.append(epoch_val_f1)
+        smoothed_val_f1 = float(np.mean(val_f1_window[-args.smoothing_window:]))
 
         history["epoch"].append(epoch)
         history["train_loss"].append(epoch_train_loss)
@@ -368,37 +440,39 @@ def run_single_experiment(args, device):
         history["val_loss"].append(epoch_val_loss)
         history["val_acc"].append(epoch_val_acc)
         history["val_macro_f1"].append(epoch_val_f1)
+        history["val_macro_f1_smoothed"].append(smoothed_val_f1)
         history["test_loss"].append(epoch_test_loss)
         history["test_acc"].append(epoch_test_acc)
 
-        if epoch_val_f1 > best_val_f1 + args.min_delta:
-            best_val_f1 = epoch_val_f1
-            best_model_state = copy.deepcopy(model.state_dict())
+        if smoothed_val_f1 > best_val_f1 + args.min_delta:
+            best_val_f1 = smoothed_val_f1
+            best_model_state = copy.deepcopy(ema.module.state_dict())
             stale_epochs = 0
         else:
             stale_epochs += 1
 
         if epoch % max(1, args.epochs // 10) == 0 or epoch == args.epochs:
-            print(f"Epoch [{epoch}/{args.epochs}] | Train Acc: {epoch_train_acc*100:.2f}% | Val Acc: {epoch_val_acc*100:.2f}% | Val Macro-F1: {epoch_val_f1*100:.2f}%")
+            print(f"Epoch [{epoch}/{args.epochs}] | Train Acc: {epoch_train_acc*100:.2f}% | Val Acc: {epoch_val_acc*100:.2f}% | Val Macro-F1: {epoch_val_f1*100:.2f}% (smoothed {smoothed_val_f1*100:.2f}%)")
         if stale_epochs >= args.patience:
             print(f"Early stopping at epoch {epoch}; validation macro-F1 did not improve for {args.patience} epochs.")
             break
 
     last_model_state = copy.deepcopy(model.state_dict())
     if best_model_state is not None:
-        model.load_state_dict(best_model_state)
+        ema.module.load_state_dict(best_model_state)
+    model_for_eval = ema.module
 
     if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
-        calibrate_dual_engine_thresholds(model, val_loader, normal_idx, device)
+        calibrate_dual_engine_thresholds(model_for_eval, val_loader, normal_idx, device)
 
     # Evaluate Test Set
-    model.eval()
+    model_for_eval.eval()
     y_preds, y_trues, y_probs = [], [], []
     start_eval = time.time()
     with torch.no_grad():
         for X_b, y_b in test_loader:
             X_b = X_b.to(device)
-            logits = model.engine2_classifier(X_b) if hasattr(model, 'engine2_classifier') else model(X_b)
+            logits = model_for_eval.engine2_classifier(X_b) if hasattr(model_for_eval, 'engine2_classifier') else model_for_eval(X_b)
             probs = F.softmax(logits, dim=-1)
             _, p = torch.max(probs, 1)
             y_preds.extend(p.cpu().numpy())
@@ -416,7 +490,7 @@ def run_single_experiment(args, device):
 
     metrics = compute_metrics(y_trues, y_preds, normal_idx=normal_idx, num_classes=num_classes)
     best_train_loss, best_train_accuracy, _ = evaluate_classifier(
-        model, train_loader, criterion_cls, device
+        model_for_eval, train_eval_loader, criterion_cls, device
     )
     metrics['train_accuracy'] = best_train_accuracy
     metrics['train_loss'] = best_train_loss
@@ -443,7 +517,7 @@ def run_single_experiment(args, device):
         X_zd, _ = preprocessor.transform(zero_day_df)
         X_zd_tensor = torch.tensor(X_zd, dtype=torch.float32).to(device)
         with torch.no_grad():
-            verdicts, _, _, _ = model.predict_verdict(X_zd_tensor, normal_class_idx=normal_idx)
+            verdicts, _, _, _ = model_for_eval.predict_verdict(X_zd_tensor, normal_class_idx=normal_idx)
             detected = (verdicts == 2).sum().item()
             pct = (detected / len(X_zd_tensor)) * 100
             metrics['zero_day_isolation_acc'] = pct
@@ -465,7 +539,7 @@ def run_kfold_experiment(args, device):
     balance_suffix = f"{args.balancer}_balanced" if args.balance else "raw"
     ds_prefix = args.dataset_name.lower().replace("-", "_")
     hide_suffix = f"_loco_{args.hide_class.lower()}" if args.hide_class else ""
-    run_tag = f"{args.loss}_lr{args.lr:g}_bs{args.batch_size}_s{args.seed}"
+    run_tag = f"{args.loss}_lr{args.lr:g}_bs{args.batch_size}_ema{args.ema_decay:g}_ar{args.adasyn_ratio:g}_s{args.seed}"
     exp_dir_name = f"{ds_prefix}_{args.model}{hide_suffix}_{balance_suffix}_{run_tag}_{args.kfold}fold_{args.epochs}ep"
     results_dir = os.path.join("results", exp_dir_name)
     os.makedirs(results_dir, exist_ok=True)
@@ -474,7 +548,7 @@ def run_kfold_experiment(args, device):
     print(f"   RUNNING {args.kfold}-FOLD CROSS VALIDATION: {exp_dir_name.upper()}")
     print("=======================================================")
 
-    raw_df = pd.read_csv(args.dataset)
+    raw_df = clean_target_rows(pd.read_csv(args.dataset), args.target_col)
     y_raw = raw_df[args.target_col].copy()
 
     skf = StratifiedKFold(n_splits=args.kfold, shuffle=True, random_state=args.seed)
@@ -489,18 +563,28 @@ def run_kfold_experiment(args, device):
         train_df = raw_df.iloc[train_idx].copy()
         val_df = raw_df.iloc[val_idx].copy()
 
-        # Isolate hidden class strictly from fold train AND val to prevent cross-entropy dimension assertion errors
-        zero_day_val_df = None
+        # Keep the outer fold as untouched test data; the hidden class is held
+        # aside for LOCO scoring and is excluded from known-class fitting.
+        zero_day_test_df = None
         if args.hide_class:
-            zero_day_val_df = val_df[val_df[args.target_col].astype(str).str.lower() == args.hide_class.lower()].copy()
+            zero_day_test_df = val_df[val_df[args.target_col].astype(str).str.lower() == args.hide_class.lower()].copy()
             val_df = val_df[val_df[args.target_col].astype(str).str.lower() != args.hide_class.lower()].copy()
             train_df = train_df[train_df[args.target_col].astype(str).str.lower() != args.hide_class.lower()].copy()
 
-        if args.balance:
-            print(f"  [*] Applying {args.balancer.upper()} Balancing on Training Fold...")
-            train_df = balance_training_data(train_df, args, args.seed + fold)
+        test_df = val_df
+        fold_counts = train_df[args.target_col].astype(str).value_counts()
+        if len(fold_counts) and fold_counts.min() < 2:
+            raise ValueError("Each training fold needs at least two examples per known class for a stratified validation split.")
+        train_df, val_df = train_test_split(
+            train_df, test_size=args.validation_fraction, random_state=args.seed + fold,
+            stratify=train_df[args.target_col]
+        )
 
-        X_train, X_val, y_train, y_val, preprocessor, _ = prepare_official_split(train_df, val_df, target_col=args.target_col, hide_class=None)
+        if args.balance:
+            print(f"  [*] Applying {args.balancer.upper()} to the inner training partition only...")
+        X_train, X_val, y_train, y_val, X_test, y_test, preprocessor = prepare_training_arrays(
+            train_df, val_df, args, args.seed + fold, test_df=test_df
+        )
 
         num_features = X_train.shape[1]
         class_names = [str(c) for c in preprocessor.target_encoder.classes_]
@@ -514,8 +598,11 @@ def run_kfold_experiment(args, device):
         if normal_idx is None:
             raise ValueError(f"Could not identify a benign/normal class in {class_names}.")
 
-        train_loader = DataLoader(TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.long)), batch_size=args.batch_size, shuffle=True)
+        train_dataset = TensorDataset(torch.tensor(X_train, dtype=torch.float32), torch.tensor(y_train, dtype=torch.long))
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, drop_last=len(train_dataset) >= args.batch_size)
+        train_eval_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=False)
         val_loader = DataLoader(TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.long)), batch_size=args.batch_size, shuffle=False)
+        test_loader = DataLoader(TensorDataset(torch.tensor(X_test, dtype=torch.float32), torch.tensor(y_test, dtype=torch.long)), batch_size=args.batch_size, shuffle=False)
 
         model = get_model(args.model, input_features=num_features, num_classes=num_classes).to(device)
         criterion_cls = make_classifier_loss(args, y_train, num_classes, device)
@@ -524,11 +611,13 @@ def run_kfold_experiment(args, device):
 
         if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
             pretrain_engine1(model, X_train, y_train, normal_idx, device, batch_size=args.batch_size, lr=args.lr, epochs=5)
+        ema = ModelEMA(model, decay=args.ema_decay)
 
-        history = {"epoch": [], "train_loss": [], "train_acc": [], "val_loss": [], "val_acc": [], "val_macro_f1": []}
+        history = {"epoch": [], "train_loss": [], "train_acc": [], "val_loss": [], "val_acc": [], "val_macro_f1": [], "val_macro_f1_smoothed": [], "test_loss": [], "test_acc": []}
         best_val_f1 = -1.0
         best_model_state = None
         stale_epochs = 0
+        val_f1_window = []
 
         for epoch in range(1, args.epochs + 1):
             model.train()
@@ -538,16 +627,23 @@ def run_kfold_experiment(args, device):
                 logits = model.engine2_classifier(X_b) if hasattr(model, 'engine2_classifier') else model(X_b)
                 loss = criterion_cls(logits, y_b)
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
                 optimizer.step()
+                ema.update(model)
 
             epoch_train_loss, epoch_train_acc, _ = evaluate_classifier(
-                model, train_loader, criterion_cls, device
+                ema.module, train_eval_loader, criterion_cls, device
             )
 
             epoch_val_loss, epoch_val_acc, epoch_val_f1 = evaluate_classifier(
-                model, val_loader, criterion_cls, device
+                ema.module, val_loader, criterion_cls, device
             )
             scheduler.step(epoch_val_loss)
+            epoch_test_loss, epoch_test_acc, _ = evaluate_classifier(
+                ema.module, test_loader, criterion_cls, device
+            )
+            val_f1_window.append(epoch_val_f1)
+            smoothed_val_f1 = float(np.mean(val_f1_window[-args.smoothing_window:]))
 
             history["epoch"].append(epoch)
             history["train_loss"].append(epoch_train_loss)
@@ -555,34 +651,38 @@ def run_kfold_experiment(args, device):
             history["val_loss"].append(epoch_val_loss)
             history["val_acc"].append(epoch_val_acc)
             history["val_macro_f1"].append(epoch_val_f1)
+            history["val_macro_f1_smoothed"].append(smoothed_val_f1)
+            history["test_loss"].append(epoch_test_loss)
+            history["test_acc"].append(epoch_test_acc)
 
-            if epoch_val_f1 > best_val_f1 + args.min_delta:
-                best_val_f1 = epoch_val_f1
-                best_model_state = copy.deepcopy(model.state_dict())
+            if smoothed_val_f1 > best_val_f1 + args.min_delta:
+                best_val_f1 = smoothed_val_f1
+                best_model_state = copy.deepcopy(ema.module.state_dict())
                 stale_epochs = 0
             else:
                 stale_epochs += 1
 
             if epoch % max(1, args.epochs // 5) == 0 or epoch == args.epochs:
-                print(f"  Epoch [{epoch}/{args.epochs}] | Train Acc: {epoch_train_acc*100:.2f}% | Val Acc: {epoch_val_acc*100:.2f}% | Val Macro-F1: {epoch_val_f1*100:.2f}%")
+                print(f"  Epoch [{epoch}/{args.epochs}] | Train Acc: {epoch_train_acc*100:.2f}% | Val Acc: {epoch_val_acc*100:.2f}% | Val Macro-F1: {epoch_val_f1*100:.2f}% (smoothed {smoothed_val_f1*100:.2f}%)")
             if stale_epochs >= args.patience:
                 print(f"  Early stopping at epoch {epoch}; validation macro-F1 did not improve for {args.patience} epochs.")
                 break
 
         last_model_state = copy.deepcopy(model.state_dict())
         if best_model_state is not None:
-            model.load_state_dict(best_model_state)
+            ema.module.load_state_dict(best_model_state)
+        model_for_eval = ema.module
 
         if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
-            calibrate_dual_engine_thresholds(model, val_loader, normal_idx, device)
+            calibrate_dual_engine_thresholds(model_for_eval, val_loader, normal_idx, device)
 
         # Final Fold Inference for Visualizations & Reports
-        model.eval()
+        model_for_eval.eval()
         y_preds, y_trues, y_probs = [], [], []
         with torch.no_grad():
-            for X_v, y_v in val_loader:
+            for X_v, y_v in test_loader:
                 X_v = X_v.to(device)
-                logits = model.engine2_classifier(X_v) if hasattr(model, 'engine2_classifier') else model(X_v)
+                logits = model_for_eval.engine2_classifier(X_v) if hasattr(model_for_eval, 'engine2_classifier') else model_for_eval(X_v)
                 probs = F.softmax(logits, dim=-1)
                 _, p = torch.max(probs, 1)
                 y_preds.extend(p.cpu().numpy())
@@ -596,7 +696,7 @@ def run_kfold_experiment(args, device):
         metrics = compute_metrics(y_trues, y_preds, normal_idx=normal_idx, num_classes=num_classes)
         metrics['fold'] = fold
         train_loss_best, train_accuracy_best, _ = evaluate_classifier(
-            model, train_loader, criterion_cls, device
+            model_for_eval, train_eval_loader, criterion_cls, device
         )
         metrics['train_accuracy'] = float(train_accuracy_best)
         metrics['train_loss'] = float(train_loss_best)
@@ -606,11 +706,11 @@ def run_kfold_experiment(args, device):
         metrics['final_test_val_accuracy'] = float(metrics['accuracy'])
 
         # LOCO Evaluation
-        if zero_day_val_df is not None and len(zero_day_val_df) > 0 and args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
-            X_zd, _ = preprocessor.transform(zero_day_val_df)
+        if zero_day_test_df is not None and len(zero_day_test_df) > 0 and args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
+            X_zd, _ = preprocessor.transform(zero_day_test_df)
             X_zd_tensor = torch.tensor(X_zd, dtype=torch.float32).to(device)
             with torch.no_grad():
-                verdicts, _, _, _ = model.predict_verdict(X_zd_tensor, normal_class_idx=normal_idx)
+                verdicts, _, _, _ = model_for_eval.predict_verdict(X_zd_tensor, normal_class_idx=normal_idx)
                 zd_detected = (verdicts == 2).sum().item()
                 zd_acc = (zd_detected / len(X_zd_tensor)) * 100
                 metrics['zero_day_isolation_acc'] = float(zd_acc)
@@ -685,11 +785,16 @@ if __name__ == '__main__':
     parser.add_argument('--model', type=str, default='dual-engine', choices=['proposed', 'dual-engine', 'cnn', 'resnet', 'resnest', 'resnet-gru'])
     parser.add_argument('--target_col', type=str, default='attack_cat')
     parser.add_argument('--epochs', type=int, default=50)
-    parser.add_argument('--batch_size', type=int, default=64)
-    parser.add_argument('--lr', type=float, default=0.001)
+    parser.add_argument('--batch_size', type=int, default=128)
+    parser.add_argument('--lr', type=float, default=0.0001)
     parser.add_argument('--patience', type=int, default=12, help='Early stopping patience on validation macro-F1')
     parser.add_argument('--min_delta', type=float, default=0.001, help='Minimum macro-F1 gain to reset early stopping')
-    parser.add_argument('--loss', choices=['cross_entropy', 'weighted', 'focal'], default='cross_entropy')
+    parser.add_argument('--smoothing_window', type=int, default=3, help='Trailing validation macro-F1 averaging window')
+    parser.add_argument('--validation_fraction', type=float, default=0.15, help='Inner validation fraction for each outer CV training fold')
+    parser.add_argument('--grad_clip', type=float, default=1.0, help='Maximum gradient norm')
+    parser.add_argument('--ema_decay', type=float, default=0.99, help='EMA decay used for validation and best checkpoint')
+    parser.add_argument('--adasyn_ratio', type=float, default=0.2, help='ADASYN minority cap relative to majority count')
+    parser.add_argument('--loss', choices=['cross_entropy', 'weighted', 'focal'], default='weighted')
     parser.add_argument('--label_smoothing', type=float, default=0.05)
     parser.add_argument('--focal_gamma', type=float, default=2.0)
     parser.add_argument('--seed', type=int, default=42)
@@ -699,6 +804,13 @@ if __name__ == '__main__':
     parser.add_argument('--hide_class', type=str, default=None, help='Class to hide for zero-day LOCO test')
     parser.add_argument('--kfold', type=int, default=0, help='Set > 1 (e.g., 5) for K-Fold CV; 0 for 3-way split')
     args = parser.parse_args()
+
+    if args.batch_size < 2 or args.patience < 1 or args.smoothing_window < 1:
+        parser.error('batch_size must be >= 2 and patience/smoothing_window must be positive.')
+    if not 0.0 < args.validation_fraction < 0.5:
+        parser.error('validation_fraction must be between 0 and 0.5.')
+    if not 0.0 < args.adasyn_ratio <= 1.0:
+        parser.error('adasyn_ratio must be in (0, 1].')
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Compute Device: {device}")

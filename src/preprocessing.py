@@ -10,6 +10,11 @@ class TrafficDataPreprocessor:
         self.target_encoder = LabelEncoder()
         self.feature_mins = None
         self.feature_maxs = None
+        self.continuous_cols = []
+        self.clip_lows = None
+        self.clip_highs = None
+        self.feature_means = None
+        self.feature_scales = None
         self.feature_cols = []
         self.categorical_cols = []
         self.encoded_feature_cols = []
@@ -58,20 +63,8 @@ class TrafficDataPreprocessor:
         ]
         X_encoded = self._encode_features(X_df, fit=True)
         self.encoded_feature_cols = X_encoded.columns.tolist()
-
-        X_mat = self._sanitize_matrix(X_encoded.values.astype(np.float32))
-
-        self.feature_mins = np.min(X_mat, axis=0)
-        self.feature_maxs = np.max(X_mat, axis=0)
-        
-        denom = (self.feature_maxs - self.feature_mins)
-        denom[denom == 0] = 1.0
-        denom[np.isnan(denom)] = 1.0
-        denom[np.isinf(denom)] = 1.0
-
-        # Normalization to [0, 1] for neural network convergence
-        X_norm = (X_mat - self.feature_mins) / denom
-        X_norm = self._sanitize_matrix(X_norm)
+        self.continuous_cols = [c for c in self.encoded_feature_cols if c in self.feature_cols and c not in self.categorical_cols]
+        X_norm = self._fit_scale(X_encoded)
 
         return X_norm, y, zero_day_df
 
@@ -105,16 +98,7 @@ class TrafficDataPreprocessor:
 
         X_encoded = self._encode_features(X_df, fit=False)
 
-        X_mat = self._sanitize_matrix(X_encoded.values.astype(np.float32))
-        
-        denom = (self.feature_maxs - self.feature_mins)
-        denom[denom == 0] = 1.0
-        denom[np.isnan(denom)] = 1.0
-        denom[np.isinf(denom)] = 1.0
-
-        # Normalization to [0, 1]
-        X_norm = (X_mat - self.feature_mins) / denom
-        X_norm = self._sanitize_matrix(X_norm)
+        X_norm = self._scale(X_encoded)
 
         return X_norm, y
 
@@ -133,12 +117,55 @@ class TrafficDataPreprocessor:
             return encoded
         return encoded.reindex(columns=self.encoded_feature_cols, fill_value=0)
 
+    def _fit_scale(self, X_encoded):
+        """Clip and standardize continuous fields using training rows only."""
+        values = X_encoded.to_numpy(dtype=np.float32, copy=True)
+        self.feature_mins = np.min(values, axis=0)
+        self.feature_maxs = np.max(values, axis=0)
+        self.clip_lows = np.full(values.shape[1], -np.inf, dtype=np.float32)
+        self.clip_highs = np.full(values.shape[1], np.inf, dtype=np.float32)
+        self.feature_means = np.zeros(values.shape[1], dtype=np.float32)
+        self.feature_scales = np.ones(values.shape[1], dtype=np.float32)
+        for col in self.continuous_cols:
+            i = self.encoded_feature_cols.index(col)
+            low, high = np.quantile(values[:, i], [0.005, 0.995])
+            if low == high:
+                low, high = float(values[:, i].min()), float(values[:, i].max())
+            self.clip_lows[i], self.clip_highs[i] = low, high
+            clipped = np.clip(values[:, i], low, high)
+            mean = float(clipped.mean())
+            scale = float(clipped.std())
+            self.feature_means[i] = mean
+            self.feature_scales[i] = scale if np.isfinite(scale) and scale > 1e-8 else 1.0
+        return self._scale(X_encoded)
+
+    def _scale(self, X_encoded):
+        values = self._sanitize_matrix(X_encoded.to_numpy(dtype=np.float32, copy=True))
+        for col in self.continuous_cols:
+            i = self.encoded_feature_cols.index(col)
+            values[:, i] = np.clip(values[:, i], self.clip_lows[i], self.clip_highs[i])
+            values[:, i] = (values[:, i] - self.feature_means[i]) / self.feature_scales[i]
+        return self._sanitize_matrix(values.astype(np.float32))
+
 def prepare_train_test_split(df, target_col='attack_cat', test_size=0.2, random_state=42, hide_class=None):
-    preprocessor = TrafficDataPreprocessor(target_col=target_col)
-    X_norm, y, zero_day_df = preprocessor.fit_transform(df, hide_class=hide_class)
-    X_train, X_test, y_train, y_test = train_test_split(
-        X_norm, y, test_size=test_size, random_state=random_state, stratify=y
+    df = df.copy()
+    zero_day_df = None
+    if hide_class and target_col in df.columns:
+        mask = df[target_col].astype(str).str.strip().str.lower() == hide_class.lower()
+        zero_day_df = df.loc[mask].copy()
+        df = df.loc[~mask].copy()
+    label_text = df[target_col].astype(str).str.strip()
+    valid = ~label_text.str.lower().isin(['nan', 'none', 'label']) & df[target_col].notna()
+    df = df.loc[valid].copy()
+    counts = df[target_col].value_counts()
+    if len(counts) and counts.min() < 2:
+        raise ValueError('Stratified train/test splitting needs at least two examples per class.')
+    train_df, test_df = train_test_split(
+        df, test_size=test_size, random_state=random_state, stratify=df[target_col]
     )
+    preprocessor = TrafficDataPreprocessor(target_col=target_col)
+    X_train, y_train, _ = preprocessor.fit_transform(train_df)
+    X_test, y_test = preprocessor.transform(test_df)
     return X_train, X_test, y_train, y_test, preprocessor, zero_day_df
 
 def prepare_official_split(train_df, test_df, target_col='attack_cat', hide_class=None):
