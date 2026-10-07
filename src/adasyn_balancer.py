@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 from collections import Counter
-from imblearn.over_sampling import SMOTENC, ADASYN, RandomOverSampler
+from imblearn.over_sampling import SMOTE, SMOTENC, ADASYN, RandomOverSampler
 
 class AdaptiveClassBalancer:
     """
@@ -13,9 +13,11 @@ class AdaptiveClassBalancer:
        - Uses SMOTENC with categorical indices identified to prevent numerical interpolation corruption.
     3. If dataset is continuous:
        - Uses ADASYN (focusing on minority density / decision boundary hardness).
-    4. Any runtime exception -> Graceful fallback to RandomOverSampler.
+    4. If ADASYN cannot synthesize a requested class, retry that class with SMOTE.
+       RandomOverSampler remains available for explicit requests or when interpolation
+       is impossible because there are too few samples.
     """
-    def __init__(self, target_col='attack_cat', max_minority_ratio=0.4, random_state=42, preferred_sampler='auto'):
+    def __init__(self, target_col='attack_cat', max_minority_ratio=0.1, random_state=42, preferred_sampler='auto'):
         self.target_col = target_col
         self.max_minority_ratio = max_minority_ratio
         self.random_state = random_state
@@ -125,14 +127,24 @@ class AdaptiveClassBalancer:
                     except Exception as class_error:
                         print(
                             f"  [!] ADASYN could not synthesize class {cls_name} "
-                            f"({class_error}); using RandomOverSampler for this class only."
+                            f"({class_error}); retrying this class with SMOTE."
                         )
-                        fallback = RandomOverSampler(
-                            sampling_strategy=class_strategy,
-                            random_state=self.random_state
-                        )
-                        X_res, y_res = fallback.fit_resample(X_res, y_res)
-                        actual_methods[cls_name] = "RandomOverSampler fallback"
+                        try:
+                            fallback = SMOTE(
+                                sampling_strategy=class_strategy,
+                                k_neighbors=min(safe_k, int(initial_counts[cls_name]) - 1),
+                                random_state=self.random_state
+                            )
+                            X_res, y_res = fallback.fit_resample(X_res, y_res)
+                            actual_methods[cls_name] = "SMOTE fallback"
+                        except Exception as smote_error:
+                            # Avoid silently repeating a class many times when both
+                            # synthetic methods fail; weighted loss still uses originals.
+                            print(
+                                f"  [!] SMOTE could not synthesize class {cls_name} "
+                                f"({smote_error}); leaving that class at its original count."
+                            )
+                            actual_methods[cls_name] = "no oversampling (ADASYN/SMOTE unavailable)"
             else:
                 print("  [!] Falling back to RandomOverSampler for the requested classes.")
                 fallback = RandomOverSampler(

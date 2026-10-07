@@ -832,7 +832,7 @@ if __name__ == '__main__':
     parser.add_argument('--validation_fraction', type=float, default=0.15, help='Inner validation fraction for each outer CV training fold')
     parser.add_argument('--grad_clip', type=float, default=1.0, help='Maximum gradient norm')
     parser.add_argument('--ema_decay', type=float, default=0.99, help='EMA decay used for validation and best checkpoint')
-    parser.add_argument('--adasyn_ratio', type=float, default=0.2, help='ADASYN minority cap relative to majority count')
+    parser.add_argument('--adasyn_ratio', type=float, default=0.1, help='Minority oversampling cap relative to majority count (default: 10%)')
     parser.add_argument('--loss', choices=['cross_entropy', 'weighted', 'focal'], default='weighted')
     parser.add_argument('--label_smoothing', type=float, default=0.05)
     parser.add_argument('--focal_gamma', type=float, default=2.0)
