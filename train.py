@@ -205,9 +205,9 @@ def plot_learning_curves(history, save_path):
     ax3.grid(True, linestyle='--', alpha=0.4)
     ax3.legend(fontsize=8)
 
-    fig.suptitle('Training, Validation, and Test Curves', fontsize=14, y=1.02)
-    fig.tight_layout()
-    plt.savefig(save_path, dpi=300)
+    fig.suptitle('Training, Validation, and Test Curves', fontsize=14, y=0.98)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    plt.savefig(save_path, dpi=300, bbox_inches='tight', pad_inches=0.15)
     plt.close()
 
 
