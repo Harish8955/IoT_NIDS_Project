@@ -1,9 +1,9 @@
-# IoT Network Intrusion Detection Project — Work Report
+# IoT Network Intrusion Detection Project â€” Work Report
 
-**Report date:** 7 October 2026  
-**Repository:** `Harish8955/IoT_NIDS_Project`  
-**Branch:** `main`  
-**Latest pushed commit:** `be98c5f` — `Add project utility and report scripts`
+**Report date:** 7 October 2026
+**Repository:** `Harish8955/IoT_NIDS_Project`
+**Branch:** `main`
+**Latest pushed commit:** `be98c5f` â€” `Add project utility and report scripts`
 
 ## 1. Project objective and model
 
@@ -23,7 +23,7 @@ The training pipeline now separates training, validation, and test data before f
 
 The preprocessor is fit on the original training partition only. It encodes categorical features using training columns, sanitizes missing and infinite values, clips continuous features at training-derived 0.5th and 99.5th percentiles, and standardizes those features using training means and scales. The fitted preprocessing values are reused to transform validation and test data.
 
-When balancing is enabled, ADASYN (or the selected balancer) receives training data only. Validation and test data remain unresampled. The default ADASYN minority cap is `0.2` of the majority-class count.
+When balancing is enabled, ADASYN (or the selected balancer) receives training data only. Validation and test data remain unresampled. The default ADASYN minority cap is `0.2` of the majority-class count. After the first training log exposed ADASYN's all-or-nothing failure across multiple classes, the balancer was updated to pass only classes needing additional samples and to retry ADASYN class by class if a joint attempt fails. Random oversampling is now limited to any individual class ADASYN cannot synthesize, and the actual method per class is printed and written to `metrics.json`. The result table is assembled with `concat` to avoid pandas fragmentation warnings.
 
 ### Training stability and model selection
 
@@ -45,7 +45,7 @@ LayerNorm changes normalization behavior but keeps the dual-engine topology, cha
 
 For the dual-engine model, the thresholds are calibrated from validation data after training:
 
-- **`tau`:** compute Engine 1 reconstruction errors for validation samples labeled benign, then set `tau = mean(error) + 3 × standard_deviation(error)`.
+- **`tau`:** compute Engine 1 reconstruction errors for validation samples labeled benign, then set `tau = mean(error) + 3 Ã— standard_deviation(error)`.
 - **`theta`:** compute Engine 2's maximum class probability for correctly classified validation samples, then set `theta` to the 5th percentile of those confidence values.
 
 At inference time, either `reconstruction_error > tau` or `p_max < theta` triggers the anomaly/zero-day verdict. If there are no eligible validation examples for a calculation, the implementation has fallback thresholds (`tau = 0.0191`, `theta = 0.85`).
@@ -113,4 +113,4 @@ A separate archive, `IoT_NIDS_Project_Package.zip`, was created in the project r
 
 Syntax checks (`python -m py_compile`) and `git diff --check` passed for the changed training/model code; the newly added utility scripts also passed Python compilation. The package ZIP was opened and checked for key source, dataset, curve, and confusion-matrix entries.
 
-No full multi-epoch training or five-fold experiment was run as part of the final artifact and warning/layout fixes. The one-epoch smoke run happened before the latest GRU and title-layout fixes. The useful next verification is to rerun the one-epoch command and confirm the warning behavior and visible chart title, then run the intended ADASYN/five-fold experiment for model evaluation. Keep the one-epoch metrics labeled as smoke-test results.
+No full multi-epoch training or five-fold experiment was run as part of the final artifact, warning/layout, LayerNorm, or class-wise ADASYN fallback fixes. The user log demonstrated that the old balancer fell back to random oversampling for an entire fold. Rerun the one-epoch command to verify the new per-class sampler logging and confirm the chart title; then run the intended ADASYN/five-fold experiment for model evaluation. Keep the one-epoch metrics labeled as smoke-test results.

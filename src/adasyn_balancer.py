@@ -20,6 +20,7 @@ class AdaptiveClassBalancer:
         self.max_minority_ratio = max_minority_ratio
         self.random_state = random_state
         self.preferred_sampler = str(preferred_sampler).lower()
+        self.actual_methods = {}
 
     def _compute_sampling_caps(self, y):
         counts = Counter(y)
@@ -44,6 +45,11 @@ class AdaptiveClassBalancer:
 
         initial_counts, sampling_strategy = self._compute_sampling_caps(y)
         min_class_samples = min(initial_counts.values())
+        target_strategy = {
+            cls_name: target_count
+            for cls_name, target_count in sampling_strategy.items()
+            if target_count > initial_counts[cls_name]
+        }
 
         cat_indices = [
             i for i, col in enumerate(X.columns)
@@ -56,13 +62,19 @@ class AdaptiveClassBalancer:
         print(f"  [*] Initial Class Distribution: {dict(initial_counts)}")
         print(f"  [*] Target Strategy (capped at {int(self.max_minority_ratio * 100)}% of majority): {sampling_strategy}")
 
+        # Only classes that actually need more samples are passed to samplers.
+        if not target_strategy:
+            print("  [*] No classes require oversampling; leaving training partition unchanged.")
+            self.actual_methods = {"all": "none (no classes under the cap)"}
+            return df
+
         # Explicit Dispatch
         sampler = None
         sampler_name = ""
 
         if self.preferred_sampler == 'random' or not can_interpolate:
             sampler_name = "RandomOverSampler (Forced or Insufficient Neighbor Support)"
-            sampler = RandomOverSampler(sampling_strategy=sampling_strategy, random_state=self.random_state)
+            sampler = RandomOverSampler(sampling_strategy=target_strategy, random_state=self.random_state)
 
         elif has_categorical:
             if self.preferred_sampler == 'adasyn':
@@ -70,7 +82,7 @@ class AdaptiveClassBalancer:
             sampler_name = f"SMOTENC (Categorical-Aware, k={safe_k})"
             sampler = SMOTENC(
                 categorical_features=cat_indices,
-                sampling_strategy=sampling_strategy,
+                sampling_strategy=target_strategy,
                 k_neighbors=safe_k,
                 random_state=self.random_state
             )
@@ -80,22 +92,73 @@ class AdaptiveClassBalancer:
                 print("  [!] Warning: SMOTENC requested on continuous data. Dispatching ADASYN.")
             sampler_name = f"ADASYN (Continuous Density, n={safe_k})"
             sampler = ADASYN(
-                sampling_strategy=sampling_strategy,
+                sampling_strategy=target_strategy,
                 n_neighbors=safe_k,
                 random_state=self.random_state
             )
 
         print(f"  [*] Selected Balancer: {sampler_name}")
 
+        actual_methods = {}
         try:
             X_res, y_res = sampler.fit_resample(X, y)
+            for cls_name in target_strategy:
+                actual_methods[cls_name] = sampler_name
         except Exception as e:
-            print(f"  [!] {sampler_name} failed ({e}). Falling back to RandomOverSampler.")
-            fallback = RandomOverSampler(sampling_strategy=sampling_strategy, random_state=self.random_state)
-            X_res, y_res = fallback.fit_resample(X, y)
+            print(f"  [!] {sampler_name} failed for the complete strategy ({e}).")
+            if sampler_name.startswith("ADASYN"):
+                # ADASYN can assign zero synthetic samples to an easy class and
+                # raise, cancelling resampling for every other requested class.
+                # Retry classes independently so only unsupported classes need
+                # a non-synthetic fallback.
+                X_res, y_res = X, y
+                for cls_name, target_count in target_strategy.items():
+                    class_strategy = {cls_name: target_count}
+                    try:
+                        class_sampler = ADASYN(
+                            sampling_strategy=class_strategy,
+                            n_neighbors=safe_k,
+                            random_state=self.random_state
+                        )
+                        X_res, y_res = class_sampler.fit_resample(X_res, y_res)
+                        actual_methods[cls_name] = "ADASYN"
+                    except Exception as class_error:
+                        print(
+                            f"  [!] ADASYN could not synthesize class {cls_name} "
+                            f"({class_error}); using RandomOverSampler for this class only."
+                        )
+                        fallback = RandomOverSampler(
+                            sampling_strategy=class_strategy,
+                            random_state=self.random_state
+                        )
+                        X_res, y_res = fallback.fit_resample(X_res, y_res)
+                        actual_methods[cls_name] = "RandomOverSampler fallback"
+            else:
+                print("  [!] Falling back to RandomOverSampler for the requested classes.")
+                fallback = RandomOverSampler(
+                    sampling_strategy=target_strategy,
+                    random_state=self.random_state
+                )
+                X_res, y_res = fallback.fit_resample(X, y)
+                for cls_name in target_strategy:
+                    actual_methods[cls_name] = "RandomOverSampler fallback"
 
-        resampled_df = pd.DataFrame(X_res, columns=X.columns)
-        resampled_df[self.target_col] = y_res
+        methods_used = sorted(set(actual_methods.values()))
+        self.actual_methods = actual_methods
+        print(f"  [*] Actual Balancing Method(s): {', '.join(methods_used)}")
+        if "RandomOverSampler fallback" in methods_used:
+            fallback_classes = [
+                str(cls_name) for cls_name, method in actual_methods.items()
+                if method == "RandomOverSampler fallback"
+            ]
+            print(f"  [!] RandomOverSampler was used only for classes: {fallback_classes}")
+
+        resampled_df = pd.DataFrame(np.asarray(X_res), columns=X.columns)
+        resampled_df = pd.concat(
+            [resampled_df, pd.Series(np.asarray(y_res), name=self.target_col)],
+            axis=1
+        )
+        resampled_df.attrs["balancing_methods"] = actual_methods
         print(f"  [*] Balanced Class Distribution: {dict(Counter(y_res))}")
         return resampled_df
 

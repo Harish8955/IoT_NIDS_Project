@@ -118,6 +118,7 @@ def prepare_training_arrays(train_df, val_df, args, seed, test_df=None):
     X_train, y_train, _ = preprocessor.fit_transform(train_df)
     X_val, y_val = preprocessor.transform(val_df)
     X_test = y_test = None
+    preprocessor.balancing_methods = {"all": "none (balancing disabled)"}
     if test_df is not None:
         X_test, y_test = preprocessor.transform(test_df)
 
@@ -129,6 +130,7 @@ def prepare_training_arrays(train_df, val_df, args, seed, test_df=None):
                 target_col=args.target_col, epochs=args.ctgan_epochs
             ).balance_dataset(train_df)
             X_train, y_train = preprocessor.transform(balanced_raw)
+            preprocessor.balancing_methods = {"all": "CTGAN"}
         else:
             train_matrix = pd.DataFrame(X_train)
             train_matrix['__target__'] = np.asarray(y_train, dtype=np.int64)
@@ -139,8 +141,23 @@ def prepare_training_arrays(train_df, val_df, args, seed, test_df=None):
             balanced = sampler.balance_dataset(train_matrix)
             X_train = balanced.drop(columns=['__target__']).to_numpy(dtype=np.float32)
             y_train = balanced['__target__'].to_numpy(dtype=np.int64)
+            preprocessor.balancing_methods = sampler.actual_methods
 
     return X_train, X_val, y_train, y_val, X_test, y_test, preprocessor
+
+
+def named_balancing_methods(preprocessor, class_names):
+    """Map encoded class IDs in balancer diagnostics back to readable labels."""
+    methods = getattr(preprocessor, 'balancing_methods', {})
+    named = {}
+    for class_id, method in methods.items():
+        try:
+            idx = int(class_id)
+            label = class_names[idx] if 0 <= idx < len(class_names) else str(class_id)
+        except (TypeError, ValueError):
+            label = str(class_id)
+        named[label] = method
+    return named
 
 
 def evaluate_classifier(model, loader, criterion, device):
@@ -504,6 +521,8 @@ def run_single_experiment(args, device):
     metrics['final_train_accuracy'] = best_train_accuracy
     metrics['best_val_macro_f1'] = best_val_f1
     metrics['test_accuracy'] = metrics['accuracy']
+    metrics['requested_balancer'] = args.balancer if args.balance else 'none'
+    metrics['actual_balancing_methods'] = named_balancing_methods(preprocessor, class_names)
     metrics['inference_latency_ms'] = latency_ms
     metrics['throughput_pps'] = throughput
 
@@ -712,6 +731,8 @@ def run_kfold_experiment(args, device):
         metrics['train_loss'] = float(train_loss_best)
         metrics['final_train_accuracy'] = float(train_accuracy_best)
         metrics['test_accuracy'] = float(metrics['accuracy'])
+        metrics['requested_balancer'] = args.balancer if args.balance else 'none'
+        metrics['actual_balancing_methods'] = named_balancing_methods(preprocessor, class_names)
         metrics['best_val_macro_f1'] = float(best_val_f1)
         metrics['final_test_val_accuracy'] = float(metrics['accuracy'])
 
