@@ -186,24 +186,20 @@ def plot_learning_curves(history, save_path):
     epochs = history["epoch"]
     fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(19, 5))
 
-    ax1.plot(epochs, history["train_loss"], 'b-', lw=1.8, label='Train')
-    ax1.plot(epochs, history["val_loss"], color='crimson', alpha=0.22, lw=1.0, label='Validation raw')
-    ax1.plot(epochs, moving_average(history["val_loss"]), 'r--', lw=1.8, label='Validation 3-epoch mean')
+    ax1.plot(epochs, history["train_loss"], 'b-', lw=1.8, label='Train loss (raw)')
+    ax1.plot(epochs, history["val_loss"], color='crimson', lw=1.5, label='Validation loss (raw)')
     if "test_loss" in history:
-        ax1.plot(epochs, history["test_loss"], color='darkorange', alpha=0.22, lw=1.0, label='Test raw')
-        ax1.plot(epochs, moving_average(history["test_loss"]), color='darkorange', lw=1.8, label='Test 3-epoch mean')
+        ax1.plot(epochs, history["test_loss"], color='darkorange', lw=1.5, label='Test loss (raw)')
     ax1.set_title('Loss', fontsize=12, pad=10)
     ax1.set_xlabel('Epoch')
     ax1.set_ylabel('Loss')
     ax1.grid(True, linestyle='--', alpha=0.4)
     ax1.legend(fontsize=8)
 
-    ax2.plot(epochs, [a * 100 for a in history["train_acc"]], 'b-', lw=1.8, label='Train Accuracy')
-    ax2.plot(epochs, [a * 100 for a in history["val_acc"]], color='green', alpha=0.22, lw=1.0, label='Validation raw')
-    ax2.plot(epochs, [a * 100 for a in moving_average(history["val_acc"])], 'g--', lw=1.8, label='Validation 3-epoch mean')
+    ax2.plot(epochs, [a * 100 for a in history["train_acc"]], 'b-', lw=1.8, label='Train accuracy (raw)')
+    ax2.plot(epochs, [a * 100 for a in history["val_acc"]], color='green', lw=1.5, label='Validation accuracy (raw)')
     if "test_acc" in history:
-        ax2.plot(epochs, [a * 100 for a in history["test_acc"]], color='darkorange', alpha=0.22, lw=1.0, label='Test raw')
-        ax2.plot(epochs, [a * 100 for a in moving_average(history["test_acc"])], color='darkorange', lw=1.8, label='Test 3-epoch mean')
+        ax2.plot(epochs, [a * 100 for a in history["test_acc"]], color='darkorange', lw=1.5, label='Test accuracy (raw)')
     ax2.set_title('Accuracy', fontsize=12, pad=10)
     ax2.set_xlabel('Epoch')
     ax2.set_ylabel('Accuracy (%)')
@@ -212,9 +208,7 @@ def plot_learning_curves(history, save_path):
     ax2.legend(fontsize=8)
 
     if "val_macro_f1" in history:
-        ax3.plot(epochs, [a * 100 for a in history["val_macro_f1"]], color='purple', alpha=0.22, lw=1.0, label='Validation raw')
-        smooth_f1 = history.get("val_macro_f1_smoothed", moving_average(history["val_macro_f1"]))
-        ax3.plot(epochs, [a * 100 for a in smooth_f1], color='purple', lw=1.8, label='Validation smoothed')
+        ax3.plot(epochs, [a * 100 for a in history["val_macro_f1"]], color='purple', lw=1.6, label='Validation macro-F1 (raw)')
     ax3.set_title('Validation Macro-F1', fontsize=12, pad=10)
     ax3.set_xlabel('Epoch')
     ax3.set_ylabel('Macro-F1 (%)')
@@ -280,47 +274,327 @@ def plot_roc_curves(y_true, y_probs, class_names, save_path):
 # =====================================================================
 # CALIBRATION & PRETRAINING
 # =====================================================================
-def calibrate_dual_engine_thresholds(model, val_loader, normal_idx, device, percentile_theta=5, k_sigma=3.0):
-    model.eval()
-    benign_recon_losses = []
-    correct_p_maxes = []
+def _select_proxy_class(class_names, y_train, y_val, normal_idx, requested='auto', hidden_class=None):
+    """Select a known attack family to exclude from the proxy classifier."""
+    train_counts = np.bincount(np.asarray(y_train, dtype=np.int64), minlength=len(class_names))
+    val_counts = np.bincount(np.asarray(y_val, dtype=np.int64), minlength=len(class_names))
+    excluded = (hidden_class or '').strip().casefold()
+    candidates = [
+        idx for idx, name in enumerate(class_names)
+        if idx != normal_idx and name.strip().casefold() != excluded
+        and train_counts[idx] > 0 and val_counts[idx] > 0
+    ]
+    if requested and requested.strip().casefold() != 'auto':
+        matches = [idx for idx, name in enumerate(class_names)
+                   if name.strip().casefold() == requested.strip().casefold()]
+        if not matches or matches[0] not in candidates:
+            available = [class_names[idx] for idx in candidates]
+            raise ValueError(
+                f"Proxy calibration class '{requested}' is unavailable. "
+                f"Choose one of these known attack classes: {available}"
+            )
+        return matches[0]
+    if not candidates:
+        raise ValueError("Proxy zero-day calibration needs a known attack class in both train and validation data.")
+    # Use the largest validation attack family so the proxy recall estimate is
+    # less sensitive to a handful of samples. Worms (or --hide_class) is excluded.
+    return max(candidates, key=lambda idx: (val_counts[idx], train_counts[idx], class_names[idx]))
 
+
+def _make_proxy_loss(args, y_train, num_classes, device):
+    """Build the configured loss while allowing the deliberately absent proxy class."""
+    counts = np.bincount(np.asarray(y_train, dtype=np.int64), minlength=num_classes).astype(np.float64)
+    active = counts > 0
+    weights = None
+    if args.loss in ('weighted', 'focal'):
+        weights_np = np.zeros(num_classes, dtype=np.float32)
+        weights_np[active] = len(y_train) / (active.sum() * counts[active])
+        weights_np[active] /= weights_np[active].mean()
+        weights = torch.tensor(weights_np, dtype=torch.float32, device=device)
+    if args.loss == 'focal':
+        return FocalLoss(class_weights=weights, gamma=args.focal_gamma)
+    return nn.CrossEntropyLoss(
+        weight=weights,
+        label_smoothing=args.label_smoothing if args.loss == 'cross_entropy' else 0.0
+    )
+
+
+def _train_proxy_classifier(args, reference_model, X_train, y_train, X_val, y_val,
+                            proxy_idx, num_classes, device):
+    """Train a same-architecture calibration copy with the proxy family excluded."""
+    train_keep = np.asarray(y_train) != proxy_idx
+    val_keep = np.asarray(y_val) != proxy_idx
+    X_proxy_train = np.asarray(X_train, dtype=np.float32)[train_keep]
+    y_proxy_train = np.asarray(y_train, dtype=np.int64)[train_keep]
+    X_known_val = np.asarray(X_val, dtype=np.float32)[val_keep]
+    y_known_val = np.asarray(y_val, dtype=np.int64)[val_keep]
+    X_proxy_val = np.asarray(X_val, dtype=np.float32)[~val_keep]
+    if not len(X_proxy_train) or not len(X_proxy_val) or not len(X_known_val):
+        raise ValueError("Proxy calibration requires proxy-family training and validation rows plus known validation rows.")
+
+    counts = np.bincount(y_proxy_train, minlength=num_classes)
+    if np.any(counts[np.arange(num_classes) != proxy_idx] == 0):
+        missing = [i for i in range(num_classes) if i != proxy_idx and counts[i] == 0]
+        raise ValueError(f"Proxy calibration is missing training samples for known class IDs {missing}.")
+
+    proxy_model = get_model(args.model, input_features=X_train.shape[1], num_classes=num_classes).to(device)
+    # Engine 1 is the benign-trained autoencoder from the final model. Only
+    # Engine 2 needs a proxy copy because the proxy experiment asks whether an
+    # unseen family is rejected by the classifier-confidence gate.
+    proxy_model.engine1_zero_day_guard.load_state_dict(
+        reference_model.engine1_zero_day_guard.state_dict()
+    )
+    proxy_model.engine1_zero_day_guard.eval()
+
+    train_loader = DataLoader(
+        TensorDataset(torch.tensor(X_proxy_train), torch.tensor(y_proxy_train)),
+        batch_size=args.batch_size, shuffle=True,
+        drop_last=len(X_proxy_train) >= args.batch_size
+    )
+    val_loader = DataLoader(
+        TensorDataset(torch.tensor(X_known_val), torch.tensor(y_known_val)),
+        batch_size=args.batch_size, shuffle=False
+    )
+    criterion = _make_proxy_loss(args, y_proxy_train, num_classes, device)
+    optimizer = optim.Adam(proxy_model.engine2_classifier.parameters(), lr=args.lr, weight_decay=1e-4)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=3, min_lr=1e-6
+    )
+    ema = ModelEMA(proxy_model, decay=args.ema_decay)
+    best_f1 = -1.0
+    best_state = None
+    stale_epochs = 0
+    val_window = []
+
+    for epoch in range(1, args.epochs + 1):
+        proxy_model.train()
+        proxy_model.engine1_zero_day_guard.eval()
+        for X_b, y_b in train_loader:
+            X_b, y_b = X_b.to(device), y_b.to(device)
+            optimizer.zero_grad()
+            logits = proxy_model.engine2_classifier(X_b)
+            loss = criterion(logits, y_b)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(proxy_model.engine2_classifier.parameters(), args.grad_clip)
+            optimizer.step()
+            ema.update(proxy_model)
+
+        val_loss, _, _ = evaluate_classifier(ema.module, val_loader, criterion, device)
+        ema.module.eval()
+        known_truth, known_prediction = [], []
+        with torch.no_grad():
+            for X_b, y_b in val_loader:
+                logits = ema.module.engine2_classifier(X_b.to(device))
+                known_truth.extend(y_b.numpy().tolist())
+                known_prediction.extend(logits.argmax(dim=1).cpu().numpy().tolist())
+        known_label_ids = [idx for idx in range(num_classes) if idx != proxy_idx]
+        val_f1 = f1_score(
+            known_truth, known_prediction, labels=known_label_ids,
+            average='macro', zero_division=0
+        )
+        scheduler.step(val_loss)
+        val_window.append(val_f1)
+        smoothed_f1 = float(np.mean(val_window[-args.smoothing_window:]))
+        if smoothed_f1 > best_f1 + args.min_delta:
+            best_f1 = smoothed_f1
+            best_state = copy.deepcopy(ema.module.engine2_classifier.state_dict())
+            stale_epochs = 0
+        else:
+            stale_epochs += 1
+        if stale_epochs >= args.patience:
+            break
+
+    if best_state is None:
+        raise RuntimeError("Proxy calibration classifier did not produce a selectable checkpoint.")
+    proxy_model.engine2_classifier.load_state_dict(best_state)
+    proxy_model.eval()
+    return proxy_model, X_known_val, y_known_val, X_proxy_val, best_f1
+
+
+def _collect_threshold_scores(engine1_model, classifier_model, X, device, batch_size=1024):
+    recon_values, confidence_values, prediction_values = [], [], []
+    X = torch.as_tensor(X, dtype=torch.float32)
+    engine1_model.eval()
+    classifier_model.eval()
     with torch.no_grad():
-        for X_val_b, y_val_b in val_loader:
-            X_val_b = X_val_b.to(device)
-            y_val_b = y_val_b.to(device)
-
-            benign_mask = (y_val_b == normal_idx)
-            if benign_mask.sum() > 0:
-                recon_loss, _ = model.engine1_zero_day_guard.compute_anomaly_score(X_val_b[benign_mask])
-                benign_recon_losses.extend(recon_loss.cpu().numpy().tolist())
-
-            logits = model.engine2_classifier(X_val_b)
+        for start in range(0, len(X), batch_size):
+            batch = X[start:start + batch_size].to(device)
+            recon, _ = engine1_model.engine1_zero_day_guard.compute_anomaly_score(batch)
+            logits = classifier_model.engine2_classifier(batch)
             probs = F.softmax(logits, dim=-1)
-            p_max, preds = torch.max(probs, dim=-1)
-            correct_mask = (preds == y_val_b)
-            if correct_mask.sum() > 0:
-                correct_p_maxes.extend(p_max[correct_mask].cpu().numpy().tolist())
+            confidence, prediction = probs.max(dim=-1)
+            recon_values.extend(recon.cpu().numpy().tolist())
+            confidence_values.extend(confidence.cpu().numpy().tolist())
+            prediction_values.extend(prediction.cpu().numpy().tolist())
+    return (np.asarray(recon_values, dtype=np.float64),
+            np.asarray(confidence_values, dtype=np.float64),
+            np.asarray(prediction_values, dtype=np.int64))
 
-    if len(benign_recon_losses) > 0:
-        mu_recon = float(np.mean(benign_recon_losses))
-        std_recon = float(np.std(benign_recon_losses))
-        calibrated_tau = float(mu_recon + k_sigma * std_recon)
-    else:
-        mu_recon, std_recon = 0.01, 0.003
-        calibrated_tau = 0.0191
 
-    if len(correct_p_maxes) > 0:
-        calibrated_theta = float(np.percentile(correct_p_maxes, percentile_theta))
-    else:
-        calibrated_theta = 0.85
+def calibrate_dual_engine_thresholds_with_proxy(
+    model, X_train, y_train, X_val, y_val, class_names, normal_idx,
+    args, device
+):
+    """Jointly sweep tau/theta using an attack family excluded from a proxy classifier."""
+    proxy_idx = _select_proxy_class(
+        class_names, y_train, y_val, normal_idx,
+        requested=args.calibration_class, hidden_class=args.hide_class
+    )
+    print(f"  [*] Pseudo-zero-day calibration family: {class_names[proxy_idx]} (excluded from calibration classifier)")
+    proxy_model, X_known, y_known, X_pseudo, proxy_val_f1 = _train_proxy_classifier(
+        args, model, X_train, y_train, X_val, y_val, proxy_idx,
+        len(class_names), device
+    )
+    known_recon, known_conf, known_pred = _collect_threshold_scores(
+        model, proxy_model, X_known, device
+    )
+    pseudo_recon, pseudo_conf, pseudo_pred = _collect_threshold_scores(
+        model, proxy_model, X_pseudo, device
+    )
 
-    model.tau_threshold = calibrated_tau
-    model.theta_threshold = calibrated_theta
+    benign_values = known_recon[y_known == normal_idx]
+    if not len(benign_values):
+        raise ValueError("Threshold calibration requires benign validation traffic.")
+    legacy_tau = float(np.mean(benign_values) + 3.0 * np.std(benign_values))
+    combined_recon = np.concatenate([known_recon, pseudo_recon])
+    combined_conf = np.concatenate([known_conf, pseudo_conf])
+    quantiles = np.linspace(0.0, 1.0, 51)
+    tau_candidates = np.unique(np.concatenate([
+        np.quantile(combined_recon, quantiles),
+        np.asarray([legacy_tau, float(np.max(known_recon)), 0.0])
+    ]))
+    theta_candidates = np.unique(np.concatenate([
+        np.quantile(combined_conf, quantiles), np.asarray([0.0, 1.0])
+    ]))
 
-    print(f"\n  [+] Calibrated Tau Threshold   : {calibrated_tau:.6f} (mu={mu_recon:.6f}, std={std_recon:.6f})")
-    print(f"  [+] Calibrated Theta Threshold : {calibrated_theta:.4f} ({percentile_theta}th percentile)")
-    return calibrated_tau, calibrated_theta
+    labels = np.unique(y_known)
+    max_allowed = float(args.calibration_max_false_zero_day_rate)
+    tau_candidates = np.sort(tau_candidates)
+    best = None
+    feasible_pair_count = 0
+    known_by_class = {int(label): y_known == label for label in labels}
+    for theta in np.sort(theta_candidates):
+        known_trigger = (known_conf < theta) | (known_pred == normal_idx)
+        pseudo_trigger = (pseudo_conf < theta) | (pseudo_pred == normal_idx)
+        known_recon_sorted = {
+            label: np.sort(known_recon[known_trigger & class_mask])
+            for label, class_mask in known_by_class.items()
+        }
+        pseudo_recon_sorted = np.sort(pseudo_recon[pseudo_trigger])
+        for tau in tau_candidates:
+            per_class_false_rates = {}
+            for label, sorted_recon in known_recon_sorted.items():
+                class_size = int(known_by_class[label].sum())
+                flagged = len(sorted_recon) - int(np.searchsorted(sorted_recon, tau, side='right'))
+                per_class_false_rates[class_names[label]] = flagged / class_size * 100.0
+            max_false_rate = max(per_class_false_rates.values(), default=0.0)
+            if max_false_rate > max_allowed:
+                continue
+            feasible_pair_count += 1
+            pseudo_flagged = len(pseudo_recon_sorted) - int(
+                np.searchsorted(pseudo_recon_sorted, tau, side='right')
+            )
+            pseudo_recall = pseudo_flagged / len(pseudo_recon) * 100.0 if len(pseudo_recon) else 0.0
+            # Prefer higher proxy recall, then fewer known false flags, and
+            # finally the more conservative (higher tau/lower theta) pair.
+            score = (pseudo_recall, -max_false_rate, float(tau), -float(theta))
+            if best is None or score > best['score']:
+                best = {
+                    'score': score, 'tau': float(tau), 'theta': float(theta),
+                    'pseudo_recall': pseudo_recall,
+                    'known_false_rate': max_false_rate,
+                    'per_class_false_rates': per_class_false_rates,
+                }
+
+    if best is None:
+        raise RuntimeError(
+            "No tau/theta pair met the configured maximum per-class known-traffic "
+            f"false zero-day rate ({max_allowed:.2f}%). Increase the limit or select another proxy class."
+        )
+
+    model.tau_threshold = best['tau']
+    model.theta_threshold = best['theta']
+    calibration_info = {
+        'method': 'proxy_attack_family_holdout_joint_threshold_sweep',
+        'proxy_class': class_names[proxy_idx],
+        'proxy_validation_samples': int(len(X_pseudo)),
+        'proxy_classifier_best_known_val_macro_f1': float(proxy_val_f1),
+        'tau': best['tau'],
+        'theta': best['theta'],
+        'proxy_zero_day_detection_rate_pct': best['pseudo_recall'],
+        'max_known_false_zero_day_rate_pct': best['known_false_rate'],
+        'max_allowed_known_false_zero_day_rate_pct': max_allowed,
+        'known_false_zero_day_rate_by_class_pct': best['per_class_false_rates'],
+        'candidate_tau_count': int(len(tau_candidates)),
+        'candidate_theta_count': int(len(theta_candidates)),
+        'feasible_pair_count': int(feasible_pair_count),
+    }
+    print(f"  [+] Proxy-calibrated Tau      : {best['tau']:.6f}")
+    print(f"  [+] Proxy-calibrated Theta    : {best['theta']:.4f}")
+    print(f"  [+] Proxy family detection    : {best['pseudo_recall']:.2f}%")
+    print(f"  [+] Max known-class false zero-day rate: {best['known_false_rate']:.2f}% (limit {max_allowed:.2f}%)")
+    return calibration_info
+
+
+def collect_dual_engine_gate_metrics(model, X, normal_idx, device, y=None, batch_size=1024):
+    """Measure Engine 1/2 gate rates for known or held-out traffic."""
+    model.eval()
+    X = torch.as_tensor(X, dtype=torch.float32)
+    y = None if y is None else torch.as_tensor(y, dtype=torch.long).cpu().numpy()
+
+    all_verdicts, all_preds, all_confidence, all_recon = [], [], [], []
+    with torch.no_grad():
+        for start in range(0, len(X), batch_size):
+            batch = X[start:start + batch_size].to(device)
+            verdicts, preds, confidence, recon = model.predict_verdict(
+                batch, normal_class_idx=normal_idx
+            )
+            all_verdicts.extend(verdicts.cpu().numpy().tolist())
+            all_preds.extend(preds.cpu().numpy().tolist())
+            all_confidence.extend(confidence.cpu().numpy().tolist())
+            all_recon.extend(recon.cpu().numpy().tolist())
+
+    verdicts = np.asarray(all_verdicts, dtype=np.int64)
+    preds = np.asarray(all_preds, dtype=np.int64)
+    confidence = np.asarray(all_confidence, dtype=np.float64)
+    recon = np.asarray(all_recon, dtype=np.float64)
+    engine1_anomaly = recon > model.tau_threshold
+    engine2_low_confidence = confidence < model.theta_threshold
+    zero_day_flag = verdicts == 2
+
+    def percent(mask):
+        return float(np.mean(mask) * 100.0) if len(mask) else 0.0
+
+    after_engine1 = engine1_anomaly
+    metrics = {
+        "engine1_anomaly_rate_pct": percent(engine1_anomaly),
+        "engine2_low_confidence_rate_after_engine1_pct": percent(
+            engine2_low_confidence[after_engine1]
+        ),
+        "engine2_normal_prediction_rate_after_engine1_pct": percent(
+            preds[after_engine1] == normal_idx
+        ),
+        "zero_day_flag_rate_pct": percent(zero_day_flag),
+    }
+
+    if y is not None and len(y) == len(verdicts):
+        is_benign = y == normal_idx
+        is_attack = ~is_benign
+        attack_reached_engine2 = is_attack & engine1_anomaly
+        metrics.update({
+            "known_traffic_false_zero_day_rate_pct": percent(zero_day_flag),
+            "benign_false_zero_day_rate_pct": percent(zero_day_flag[is_benign]),
+            "known_attack_false_zero_day_rate_pct": percent(zero_day_flag[is_attack]),
+            "benign_engine1_anomaly_rate_pct": percent(engine1_anomaly[is_benign]),
+            "known_attack_engine1_bypass_rate_pct": percent(~engine1_anomaly[is_attack]),
+            "known_attack_engine2_low_confidence_rate_after_engine1_pct": percent(
+                engine2_low_confidence[attack_reached_engine2]
+            ),
+            "known_attack_engine2_normal_prediction_rate_after_engine1_pct": percent(
+                preds[attack_reached_engine2] == normal_idx
+            ),
+        })
+    return metrics
 
 
 def pretrain_engine1(model, X_train, y_train, normal_idx, device, batch_size=64, lr=0.001, epochs=5):
@@ -486,8 +760,12 @@ def run_single_experiment(args, device):
         ema.module.load_state_dict(best_model_state)
     model_for_eval = ema.module
 
+    threshold_calibration_info = None
     if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
-        calibrate_dual_engine_thresholds(model_for_eval, val_loader, normal_idx, device)
+        threshold_calibration_info = calibrate_dual_engine_thresholds_with_proxy(
+            model_for_eval, X_train, y_train, X_val, y_val, class_names,
+            normal_idx, args, device
+        )
 
     # Evaluate Test Set
     model_for_eval.eval()
@@ -513,6 +791,18 @@ def run_single_experiment(args, device):
     y_probs = np.array(y_probs)
 
     metrics = compute_metrics(y_trues, y_preds, normal_idx=normal_idx, num_classes=num_classes)
+    if threshold_calibration_info is not None:
+        metrics['threshold_calibration'] = threshold_calibration_info
+    if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
+        validation_gates = collect_dual_engine_gate_metrics(
+            model_for_eval, X_val, normal_idx, device, y=y_val
+        )
+        test_gates = collect_dual_engine_gate_metrics(
+            model_for_eval, X_test, normal_idx, device, y=y_test
+        )
+        metrics.update({f"validation_{key}": value for key, value in validation_gates.items()})
+        metrics.update({f"known_test_{key}": value for key, value in test_gates.items()})
+
     best_train_loss, best_train_accuracy, _ = evaluate_classifier(
         model_for_eval, train_eval_loader, criterion_cls, device
     )
@@ -544,13 +834,20 @@ def run_single_experiment(args, device):
 
     if zero_day_df is not None and len(zero_day_df) > 0:
         X_zd, _ = preprocessor.transform(zero_day_df)
-        X_zd_tensor = torch.tensor(X_zd, dtype=torch.float32).to(device)
-        with torch.no_grad():
-            verdicts, _, _, _ = model_for_eval.predict_verdict(X_zd_tensor, normal_class_idx=normal_idx)
-            detected = (verdicts == 2).sum().item()
-            pct = (detected / len(X_zd_tensor)) * 100
-            metrics['zero_day_isolation_acc'] = pct
-            print(f"  [+] Zero-Day Isolation Rate: {detected}/{len(X_zd_tensor)} ({pct:.2f}%)")
+        zero_day_gates = collect_dual_engine_gate_metrics(
+            model_for_eval, X_zd, normal_idx, device
+        )
+        zero_day_gates['isolation_rate_pct'] = zero_day_gates.pop('zero_day_flag_rate_pct')
+        metrics.update({f"zero_day_{key}": value for key, value in zero_day_gates.items()})
+        pct = zero_day_gates['isolation_rate_pct']
+        metrics['zero_day_isolation_acc'] = pct
+        detected = int(round(pct * len(X_zd) / 100.0))
+        print(f"  [+] Zero-Day Isolation Rate: {detected}/{len(X_zd)} ({pct:.2f}%)")
+        print(
+            "  [+] Gate diagnostics: "
+            f"Engine 1 passed {zero_day_gates['engine1_anomaly_rate_pct']:.2f}% to Engine 2; "
+            f"Engine 2 low confidence on {zero_day_gates['engine2_low_confidence_rate_after_engine1_pct']:.2f}% of those."
+        )
 
     torch.save(best_model_state, os.path.join(results_dir, "best_model.pt"))
     torch.save(last_model_state, os.path.join(results_dir, "last_model.pt"))
@@ -702,8 +999,12 @@ def run_kfold_experiment(args, device):
             ema.module.load_state_dict(best_model_state)
         model_for_eval = ema.module
 
+        threshold_calibration_info = None
         if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
-            calibrate_dual_engine_thresholds(model_for_eval, val_loader, normal_idx, device)
+            threshold_calibration_info = calibrate_dual_engine_thresholds_with_proxy(
+                model_for_eval, X_train, y_train, X_val, y_val, class_names,
+                normal_idx, args, device
+            )
 
         # Final Fold Inference for Visualizations & Reports
         model_for_eval.eval()
@@ -723,7 +1024,19 @@ def run_kfold_experiment(args, device):
         y_probs = np.array(y_probs)
 
         metrics = compute_metrics(y_trues, y_preds, normal_idx=normal_idx, num_classes=num_classes)
+        if threshold_calibration_info is not None:
+            metrics['threshold_calibration'] = threshold_calibration_info
         metrics['fold'] = fold
+        if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
+            validation_gates = collect_dual_engine_gate_metrics(
+                model_for_eval, X_val, normal_idx, device, y=y_val
+            )
+            known_test_gates = collect_dual_engine_gate_metrics(
+                model_for_eval, X_test, normal_idx, device, y=y_test
+            )
+            metrics.update({f"validation_{key}": value for key, value in validation_gates.items()})
+            metrics.update({f"known_test_{key}": value for key, value in known_test_gates.items()})
+
         train_loss_best, train_accuracy_best, _ = evaluate_classifier(
             model_for_eval, train_eval_loader, criterion_cls, device
         )
@@ -739,13 +1052,20 @@ def run_kfold_experiment(args, device):
         # LOCO Evaluation
         if zero_day_test_df is not None and len(zero_day_test_df) > 0 and args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
             X_zd, _ = preprocessor.transform(zero_day_test_df)
-            X_zd_tensor = torch.tensor(X_zd, dtype=torch.float32).to(device)
-            with torch.no_grad():
-                verdicts, _, _, _ = model_for_eval.predict_verdict(X_zd_tensor, normal_class_idx=normal_idx)
-                zd_detected = (verdicts == 2).sum().item()
-                zd_acc = (zd_detected / len(X_zd_tensor)) * 100
-                metrics['zero_day_isolation_acc'] = float(zd_acc)
-                print(f"  [Fold {fold} Zero-Day LOCO] Detected {zd_detected}/{len(X_zd_tensor)} ({zd_acc:.2f}%)")
+            zero_day_gates = collect_dual_engine_gate_metrics(
+                model_for_eval, X_zd, normal_idx, device
+            )
+            zero_day_gates['isolation_rate_pct'] = zero_day_gates.pop('zero_day_flag_rate_pct')
+            metrics.update({f"zero_day_{key}": value for key, value in zero_day_gates.items()})
+            zd_acc = zero_day_gates['isolation_rate_pct']
+            metrics['zero_day_isolation_acc'] = float(zd_acc)
+            zd_detected = int(round(zd_acc * len(X_zd) / 100.0))
+            print(f"  [Fold {fold} Zero-Day LOCO] Detected {zd_detected}/{len(X_zd)} ({zd_acc:.2f}%)")
+            print(
+                "  [Fold {fold} Gate diagnostics] ".format(fold=fold) +
+                f"Engine 1 passed {zero_day_gates['engine1_anomaly_rate_pct']:.2f}% to Engine 2; "
+                f"Engine 2 low confidence on {zero_day_gates['engine2_low_confidence_rate_after_engine1_pct']:.2f}% of those."
+            )
 
         fold_metrics.append(metrics)
         all_fold_histories.append(history)
@@ -792,6 +1112,19 @@ def run_kfold_experiment(args, device):
         "std_false_alarm_rate": float(np.std(fars)),
         "folds": fold_metrics
     }
+
+    # Aggregate gate diagnostics across folds while retaining the per-fold
+    # values above for identifying which stage limits zero-day detection.
+    diagnostic_prefixes = ('validation_', 'known_test_', 'zero_day_')
+    diagnostic_keys = [
+        key for key, value in fold_metrics[0].items()
+        if key.startswith(diagnostic_prefixes) and isinstance(value, (int, float))
+    ] if fold_metrics else []
+    for key in diagnostic_keys:
+        values = [float(m[key]) for m in fold_metrics if key in m]
+        if values:
+            summary[f"mean_{key}"] = float(np.mean(values))
+            summary[f"std_{key}"] = float(np.std(values))
 
     if args.hide_class and 'zero_day_isolation_acc' in fold_metrics[0]:
         zd_accs = [m['zero_day_isolation_acc'] for m in fold_metrics]
@@ -841,6 +1174,8 @@ if __name__ == '__main__':
     parser.add_argument('--balancer', type=str, default='adasyn', choices=['adasyn', 'smotenc', 'random', 'auto', 'ctgan'])
     parser.add_argument('--ctgan_epochs', type=int, default=10)
     parser.add_argument('--hide_class', type=str, default=None, help='Class to hide for zero-day LOCO test')
+    parser.add_argument('--calibration_class', type=str, default='auto', help='Known attack family held out from the proxy calibration classifier; auto selects the largest validation attack family')
+    parser.add_argument('--calibration_max_false_zero_day_rate', type=float, default=5.0, help='Maximum per-class known-validation false zero-day rate allowed during joint threshold calibration (percent)')
     parser.add_argument('--kfold', type=int, default=0, help='Set > 1 (e.g., 5) for K-Fold CV; 0 for 3-way split')
     args = parser.parse_args()
 
@@ -850,6 +1185,8 @@ if __name__ == '__main__':
         parser.error('validation_fraction must be between 0 and 0.5.')
     if not 0.0 < args.adasyn_ratio <= 1.0:
         parser.error('adasyn_ratio must be in (0, 1].')
+    if not 0.0 <= args.calibration_max_false_zero_day_rate <= 100.0:
+        parser.error('calibration_max_false_zero_day_rate must be between 0 and 100.')
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Compute Device: {device}")
