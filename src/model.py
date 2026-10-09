@@ -299,22 +299,41 @@ class DualEngineIoT_NIDS(nn.Module):
         
         is_anomaly = recon_loss > self.tau_threshold
         is_low_confidence = p_max < self.theta_threshold
-        is_zero_day = is_anomaly | is_low_confidence
+        # Sequential gate: Engine 1 must first mark a sample anomalous;
+        # Engine 2's low confidence then decides whether it is zero-day.
+        is_zero_day = is_anomaly & is_low_confidence
 
         return class_logits, is_zero_day, recon_loss, p_max
 
     def predict_verdict(self, x, normal_class_idx=0):
-        class_logits, is_zero_day, recon_loss, p_max = self.forward(x)
-        _, preds = torch.max(class_logits, dim=-1)
-        
+        # Engine 1 is the first gate. Samples reconstructed as normal exit as
+        # benign; only anomalous samples are sent through Engine 2.
+        recon_loss, _ = self.engine1_zero_day_guard.compute_anomaly_score(x)
+        is_anomaly = recon_loss > self.tau_threshold
+
         # 0: Benign, 1: Known Attack, 2: Zero-Day / Anomaly
-        verdicts = torch.full((x.size(0),), 2, dtype=torch.long, device=x.device)
-        is_normal_recon = recon_loss <= self.tau_threshold
-        is_high_conf = p_max >= self.theta_threshold
-        
-        verdicts[is_normal_recon & is_high_conf & (preds == normal_class_idx)] = 0
-        verdicts[is_normal_recon & is_high_conf & (preds != normal_class_idx)] = 1
-        
+        verdicts = torch.zeros(x.size(0), dtype=torch.long, device=x.device)
+        preds = torch.full(
+            (x.size(0),), normal_class_idx, dtype=torch.long, device=x.device
+        )
+        p_max = torch.ones(x.size(0), dtype=x.dtype, device=x.device)
+
+        if is_anomaly.any():
+            anomalous_logits = self.engine2_classifier(x[is_anomaly])
+            anomalous_probs = F.softmax(anomalous_logits, dim=-1)
+            anomalous_p_max, anomalous_preds = torch.max(anomalous_probs, dim=-1)
+            preds[is_anomaly] = anomalous_preds
+            p_max[is_anomaly] = anomalous_p_max
+
+            high_confidence = anomalous_p_max >= self.theta_threshold
+            # A confident non-benign prediction is a known attack. If Engine 2
+            # instead predicts benign for an Engine-1 anomaly, treat the engine
+            # disagreement conservatively as zero-day.
+            known_attack = high_confidence & (anomalous_preds != normal_class_idx)
+            anomalous_indices = torch.nonzero(is_anomaly, as_tuple=True)[0]
+            verdicts[anomalous_indices] = 2
+            verdicts[anomalous_indices[known_attack]] = 1
+
         return verdicts, preds, p_max, recon_loss
 
 
