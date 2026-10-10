@@ -326,10 +326,16 @@ def calibrate_dual_engine_thresholds(model, val_loader, normal_idx, device, perc
     return calibrated_tau, calibrated_theta
 
 
-def pretrain_engine1(model, X_train, y_train, normal_idx, device, batch_size=64, lr=0.001, epochs=5):
+def pretrain_engine1(
+    model, X_train, y_train, normal_idx, device, batch_size=64, lr=0.001,
+    epochs=5, weight_decay=1e-4
+):
     print("  [*] Pretraining Engine 1 Autoencoder on benign samples...")
     criterion_recon = nn.MSELoss()
-    ae_optimizer = optim.Adam(model.engine1_zero_day_guard.parameters(), lr=lr)
+    ae_optimizer = optim.Adam(
+        model.engine1_zero_day_guard.parameters(), lr=lr,
+        betas=(0.9, 0.999), eps=1e-8, weight_decay=weight_decay
+    )
     
     benign_mask = (y_train == normal_idx)
     X_train_benign = X_train[benign_mask]
@@ -364,7 +370,7 @@ def run_single_experiment(args, device):
     balance_suffix = f"{args.balancer}_balanced" if args.balance else "raw"
     ds_prefix = args.dataset_name.lower().replace("-", "_")
     hide_suffix = f"_loco_{args.hide_class.lower()}" if args.hide_class else ""
-    run_tag = f"{args.loss}_lr{args.lr:g}_bs{args.batch_size}_ema{args.ema_decay:g}_ar{args.adasyn_ratio:g}_s{args.seed}"
+    run_tag = f"{args.loss}_lr{args.lr:g}_wd{args.weight_decay:g}_bs{args.batch_size}_ema{args.ema_decay:g}_ar{args.adasyn_ratio:g}_s{args.seed}"
     exp_name = f"{ds_prefix}_{args.model}{hide_suffix}_{balance_suffix}_{run_tag}_{args.epochs}ep"
     results_dir = os.path.join("results", exp_name)
     os.makedirs(results_dir, exist_ok=True)
@@ -421,11 +427,18 @@ def run_single_experiment(args, device):
     criterion_cls = make_classifier_loss(
         args, y_train, num_classes, device, class_weight_targets=class_weight_targets
     )
-    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
+    optimizer = optim.Adam(
+        model.parameters(), lr=args.lr, betas=(0.9, 0.999), eps=1e-8,
+        weight_decay=args.weight_decay
+    )
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, min_lr=1e-6)
 
     if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
-        pretrain_engine1(model, X_train, y_train, normal_idx, device, batch_size=args.batch_size, lr=args.lr, epochs=10)
+        pretrain_engine1(
+            model, X_train, y_train, normal_idx, device,
+            batch_size=args.batch_size, lr=args.lr, epochs=10,
+            weight_decay=args.weight_decay
+        )
     ema = ModelEMA(model, decay=args.ema_decay)
 
     history = {"epoch": [], "train_loss": [], "train_acc": [], "val_loss": [], "val_acc": [], "val_macro_f1": [], "val_macro_f1_smoothed": [], "test_loss": [], "test_acc": []}
@@ -574,7 +587,7 @@ def run_kfold_experiment(args, device):
     balance_suffix = f"{args.balancer}_balanced" if args.balance else "raw"
     ds_prefix = args.dataset_name.lower().replace("-", "_")
     hide_suffix = f"_loco_{args.hide_class.lower()}" if args.hide_class else ""
-    run_tag = f"{args.loss}_lr{args.lr:g}_bs{args.batch_size}_ema{args.ema_decay:g}_ar{args.adasyn_ratio:g}_s{args.seed}"
+    run_tag = f"{args.loss}_lr{args.lr:g}_wd{args.weight_decay:g}_bs{args.batch_size}_ema{args.ema_decay:g}_ar{args.adasyn_ratio:g}_s{args.seed}"
     exp_dir_name = f"{ds_prefix}_{args.model}{hide_suffix}_{balance_suffix}_{run_tag}_{args.kfold}fold_{args.epochs}ep"
     results_dir = os.path.join("results", exp_dir_name)
     os.makedirs(results_dir, exist_ok=True)
@@ -646,11 +659,18 @@ def run_kfold_experiment(args, device):
         criterion_cls = make_classifier_loss(
             args, y_train, num_classes, device, class_weight_targets=class_weight_targets
         )
-        optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
+        optimizer = optim.Adam(
+            model.parameters(), lr=args.lr, betas=(0.9, 0.999), eps=1e-8,
+            weight_decay=args.weight_decay
+        )
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, min_lr=1e-6)
 
         if args.model.lower() in ['dual-engine', 'dual_engine', 'dual']:
-            pretrain_engine1(model, X_train, y_train, normal_idx, device, batch_size=args.batch_size, lr=args.lr, epochs=5)
+            pretrain_engine1(
+                model, X_train, y_train, normal_idx, device,
+                batch_size=args.batch_size, lr=args.lr, epochs=5,
+                weight_decay=args.weight_decay
+            )
         ema = ModelEMA(model, decay=args.ema_decay)
 
         history = {"epoch": [], "train_loss": [], "train_acc": [], "val_loss": [], "val_acc": [], "val_macro_f1": [], "val_macro_f1_smoothed": [], "test_loss": [], "test_acc": []}
@@ -837,6 +857,7 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--lr', type=float, default=0.0001)
+    parser.add_argument('--weight_decay', type=float, default=0.0001, help='Adam L2 weight decay for classifier and Engine 1; default 1e-4')
     parser.add_argument('--patience', type=int, default=12, help='Early stopping patience on validation macro-F1')
     parser.add_argument('--min_delta', type=float, default=0.001, help='Minimum macro-F1 gain to reset early stopping')
     parser.add_argument('--smoothing_window', type=int, default=3, help='Trailing validation macro-F1 averaging window')
@@ -859,6 +880,8 @@ if __name__ == '__main__':
         parser.error('batch_size must be >= 2 and patience/smoothing_window must be positive.')
     if not 0.0 < args.validation_fraction < 0.5:
         parser.error('validation_fraction must be between 0 and 0.5.')
+    if args.weight_decay < 0.0:
+        parser.error('weight_decay must be non-negative.')
     if not 0.0 < args.adasyn_ratio <= 1.0:
         parser.error('adasyn_ratio must be in (0, 1].')
 
