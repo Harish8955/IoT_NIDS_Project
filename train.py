@@ -94,13 +94,15 @@ def moving_average(values, window=3):
     return [float(np.mean(values[max(0, i - window + 1):i + 1])) for i in range(len(values))]
 
 
-def make_classifier_loss(args, y_train, num_classes, device):
+def make_classifier_loss(args, y_train, num_classes, device, class_weight_targets=None):
     weights = None
     if args.loss in ('weighted', 'focal'):
-        counts = np.bincount(np.asarray(y_train, dtype=np.int64), minlength=num_classes)
+        labels_for_weights = y_train if class_weight_targets is None else class_weight_targets
+        labels_for_weights = np.asarray(labels_for_weights, dtype=np.int64)
+        counts = np.bincount(labels_for_weights, minlength=num_classes)
         if np.any(counts == 0):
             raise ValueError('Every classifier class must have at least one training sample.')
-        weights = len(y_train) / (num_classes * counts.astype(np.float64))
+        weights = len(labels_for_weights) / (num_classes * counts.astype(np.float64))
         weights = torch.tensor(weights, dtype=torch.float32, device=device)
         # Keep the average class weight at one to preserve the learning-rate scale.
         weights = weights / weights.mean()
@@ -116,6 +118,7 @@ def prepare_training_arrays(train_df, val_df, args, seed, test_df=None):
     """Fit preprocessing on original train rows; resample only encoded train rows."""
     preprocessor = TrafficDataPreprocessor(target_col=args.target_col)
     X_train, y_train, _ = preprocessor.fit_transform(train_df)
+    class_weight_targets = np.asarray(y_train, dtype=np.int64).copy()
     X_val, y_val = preprocessor.transform(val_df)
     X_test = y_test = None
     preprocessor.balancing_methods = {"all": "none (balancing disabled)"}
@@ -143,7 +146,7 @@ def prepare_training_arrays(train_df, val_df, args, seed, test_df=None):
             y_train = balanced['__target__'].to_numpy(dtype=np.int64)
             preprocessor.balancing_methods = sampler.actual_methods
 
-    return X_train, X_val, y_train, y_val, X_test, y_test, preprocessor
+    return X_train, X_val, y_train, y_val, X_test, y_test, preprocessor, class_weight_targets
 
 
 def named_balancing_methods(preprocessor, class_names):
@@ -391,9 +394,10 @@ def run_single_experiment(args, device):
 
     if args.balance:
         print(f"\n--- STAGE: Balancing via {args.balancer.upper()} (Training Partition Only) ---")
-    X_train, X_val, y_train, y_val, X_test, y_test, preprocessor = prepare_training_arrays(
-        train_df, val_df, args, args.seed, test_df=test_df
-    )
+    (
+        X_train, X_val, y_train, y_val, X_test, y_test,
+        preprocessor, class_weight_targets
+    ) = prepare_training_arrays(train_df, val_df, args, args.seed, test_df=test_df)
 
     num_features = X_train.shape[1]
     class_names = [str(c) for c in preprocessor.target_encoder.classes_]
@@ -414,7 +418,9 @@ def run_single_experiment(args, device):
     test_loader = DataLoader(TensorDataset(torch.tensor(X_test, dtype=torch.float32), torch.tensor(y_test, dtype=torch.long)), batch_size=args.batch_size, shuffle=False)
 
     model = get_model(args.model, input_features=num_features, num_classes=num_classes).to(device)
-    criterion_cls = make_classifier_loss(args, y_train, num_classes, device)
+    criterion_cls = make_classifier_loss(
+        args, y_train, num_classes, device, class_weight_targets=class_weight_targets
+    )
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, min_lr=1e-6)
 
@@ -611,7 +617,10 @@ def run_kfold_experiment(args, device):
 
         if args.balance:
             print(f"  [*] Applying {args.balancer.upper()} to the inner training partition only...")
-        X_train, X_val, y_train, y_val, X_test, y_test, preprocessor = prepare_training_arrays(
+        (
+            X_train, X_val, y_train, y_val, X_test, y_test,
+            preprocessor, class_weight_targets
+        ) = prepare_training_arrays(
             train_df, val_df, args, args.seed + fold, test_df=test_df
         )
 
@@ -634,7 +643,9 @@ def run_kfold_experiment(args, device):
         test_loader = DataLoader(TensorDataset(torch.tensor(X_test, dtype=torch.float32), torch.tensor(y_test, dtype=torch.long)), batch_size=args.batch_size, shuffle=False)
 
         model = get_model(args.model, input_features=num_features, num_classes=num_classes).to(device)
-        criterion_cls = make_classifier_loss(args, y_train, num_classes, device)
+        criterion_cls = make_classifier_loss(
+            args, y_train, num_classes, device, class_weight_targets=class_weight_targets
+        )
         optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-4)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=3, min_lr=1e-6)
 
